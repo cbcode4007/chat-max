@@ -1,6 +1,6 @@
-# File:        chatmax-v0-0-2.py
+# File:        chatmax-v0-0-3.py
 # Author:      Colin Bond
-# Version:     0.0.2 (2023-10-16, added threading to let the user message appear and give the AI response a status)
+# Version:     0.0.3 (2023-10-16, added user preferences loading from a file for some more personalized responses)
 # Description: A simple chat interface for interacting with GPT models from an endpoint.
 
 import tkinter as tk
@@ -24,6 +24,19 @@ def send_message():
 
     # Convert GUI history to ChatGPT format WITH system role
     messages_for_gpt = [{"role": "system", "content": "You are a lively and thoughtful chat partner who enjoys engaging in very casual and concise conversation. You keep your replies short and to the point, with a touch of bluntness, but try to be helpful nonetheless."}]
+
+    # If a preferences.txt file exists next to this script, append its contents as an additional system message
+    try:
+        import os
+        prefs_path = os.path.join(os.path.dirname(__file__), 'preferences.txt')
+        if os.path.exists(prefs_path):
+            with open(prefs_path, 'r', encoding='utf-8') as pf:
+                prefs_text = pf.read().strip()
+                if prefs_text:
+                    messages_for_gpt.append({"role": "system", "content": prefs_text})
+    except Exception:
+        # Ignore preference-load errors; do not change payload if reading fails
+        pass
     for role, msg in history:
         messages_for_gpt.append({"role": "user" if role == "You" else "assistant", "content": msg})
 

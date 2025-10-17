@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-0.py
+# File:        chatmax-v0-2-1.py
 # Author:      Colin Bond
-# Version:     0.2.0 (2023-10-17, added configurable personality settings)
+# Version:     0.2.1 (2023-10-17, added a few new personality sliders)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -40,21 +40,26 @@ def send_message():
     # Personality instructions built from sliders (appended as another system message)
     def build_personality_instructions():
         parts = []
-        f = friendliness_var.get()
+        # core sliders
+        f = friendliness_var.get()        # now represents Politeness
         p = professionalism_var.get()
         r = profanity_var.get()
         a = age_var.get()
         g = gender_var.get()
+        # new sliders
+        h = humor_var.get()
+        s = sarcasm_var.get()
+        i = introversion_var.get()
 
-        # Friendliness (discrete 0-3)
+        # Politeness (discrete 0-3)
         if f == 3:
-            parts.append('Be very friendly and warm.')
+            parts.append('Be very polite and warm.')
         elif f == 2:
-            parts.append('Be friendly.')
+            parts.append('Be polite.')
         elif f == 1:
-            parts.append('Be slightly reserved.')
+            parts.append('Be slightly curt but polite.')
         else:
-            parts.append('Be very reserved and concise.')
+            parts.append('Be terse and to the point.')
 
         # Professionalism (discrete 0-2)
         if p == 2:
@@ -64,13 +69,17 @@ def send_message():
         else:
             parts.append('Use casual language.')
 
-        # Profanity (discrete 0-2)
-        if r == 2:
-            parts.append('Profanity allowed: high (may use strong coarse language).')
-        elif r == 1:
-            parts.append('Profanity allowed: moderate (occasional mild swear words).')
+        # Profanity (discrete 0-2) -- but enforce age constraint: young voices should not use profanity
+        if a <= 15:
+            # force no profanity for young ages
+            parts.append('Do not use profanity; avoid coarse language due to youthful voice.')
         else:
-            parts.append('No profanity; use clean language.')
+            if r == 2:
+                parts.append('Profanity allowed: high (may use strong coarse language).')
+            elif r == 1:
+                parts.append('Profanity allowed: moderate (occasional mild swear words).')
+            else:
+                parts.append('No profanity; use clean language.')
 
         # Age
         parts.append(f'Adopt the voice of someone aged {a}.')
@@ -82,6 +91,30 @@ def send_message():
             parts.append('Use a masculine voice/wording.')
         else:
             parts.append('Use neutral wording.')
+
+        # Humor (0-2)
+        if h == 2:
+            parts.append('Use high levels of humour where appropriate.')
+        elif h == 1:
+            parts.append('Use light humour occasionally.')
+        else:
+            parts.append('Avoid humour; be straightforward.')
+
+        # Sarcasm (0-2)
+        if s == 2:
+            parts.append('Sarcasm permitted: use sharp, ironic remarks when fitting.')
+        elif s == 1:
+            parts.append('Sarcasm permitted: mild, playful irony allowed.')
+        else:
+            parts.append('Do not use sarcasm; be literal and sincere.')
+
+        # Introversion (0-2): 0=extroverted,1=neutral,2=introverted
+        if i == 2:
+            parts.append("Favor solitary/quiet hobbies and mention mild nervousness or reserve in social situations when relevant. Do not be excitable, for instance lay off of exclamation marks unless absolutely necessary.")
+        elif i == 1:
+            parts.append('No particular bias toward introversion or extroversion.')
+        else:
+            parts.append('Favor social/outgoing hobbies and confident wording. Be excitable and enthusiastic where appropriate, expressing with exclamation marks more often than not.')
 
         return ' '.join(parts)
 
@@ -342,7 +375,7 @@ def open_personality_window():
 
     tk.Label(win, text='Personality', font=(None, 12, 'bold')).pack(pady=(6,4))
 
-    tk.Label(win, text='Friendliness (0=reserved, 1=slightly, 2=friendly, 3=very)').pack(anchor='w', padx=8)
+    tk.Label(win, text='Politeness (0=terse,1=slightly curt,2=polite,3=very polite)').pack(anchor='w', padx=8)
     tk.Scale(win, from_=0, to=3, orient=tk.HORIZONTAL, variable=friendliness_var).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Professionalism (0=casual,1=somewhat,2=professional)').pack(anchor='w', padx=8)
@@ -357,6 +390,16 @@ def open_personality_window():
     tk.Label(win, text='Gender (0=masculine,1=neutral,2=feminine)').pack(anchor='w', padx=8)
     tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=gender_var).pack(fill=tk.X, padx=8)
 
+    # New sliders: Humor, Sarcasm, Introversion
+    tk.Label(win, text='Humour (0=none,1=light,2=high)').pack(anchor='w', padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=humor_var).pack(fill=tk.X, padx=8)
+
+    tk.Label(win, text='Sarcasm (0=none,1=mild,2=strong)').pack(anchor='w', padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=sarcasm_var).pack(fill=tk.X, padx=8)
+
+    tk.Label(win, text='Introversion (0=extroverted,1=neutral,2=introverted)').pack(anchor='w', padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=introversion_var).pack(fill=tk.X, padx=8)
+
     # Summary shown in the window too (wraplength will be updated on resize)
     win_summary = tk.Label(win, text='', wraplength=280, justify='left')
     win_summary.pack(padx=8, pady=10, fill=tk.X)
@@ -368,7 +411,8 @@ def open_personality_window():
             win_summary.config(text=summary_label.cget('text'))
 
     # Register traces once so update_both runs when any var changes
-    for var in (friendliness_var, professionalism_var, profanity_var, age_var, gender_var):
+    for var in (friendliness_var, professionalism_var, profanity_var, age_var, gender_var,
+                humor_var, sarcasm_var, introversion_var):
         var.trace_add('write', update_both)
 
     # Initialize window summary
@@ -444,9 +488,13 @@ professionalism_var = tk.IntVar(value=1)
 profanity_var = tk.IntVar(value=0)
 age_var = tk.IntVar(value=30)
 gender_var = tk.IntVar(value=1)
+# New personality sliders
+humor_var = tk.IntVar(value=0)
+sarcasm_var = tk.IntVar(value=0)
+introversion_var = tk.IntVar(value=1)
 
 # Live summary label in main UI (updated by personality window)
-summary_label = tk.Label(root, text="Summary: Friendly, casual", wraplength=400, justify='left')
+summary_label = tk.Label(root, text="Summary: polite, somewhat professional, clean language, no humour, no sarcasm, neutral extroversion, age 30, neutral", wraplength=400, justify='left')
 summary_label.pack(padx=8, pady=(4,6))
 
 def update_summary(*args):
@@ -455,16 +503,19 @@ def update_summary(*args):
     r = profanity_var.get()
     a = age_var.get()
     g = gender_var.get()
+    h = humor_var.get()
+    s = sarcasm_var.get()
+    i = introversion_var.get()
     tone = []
-    # Friendliness mapping (0-3)
+    # Politeness mapping (0-3)
     if f == 3:
-        tone.append('very friendly')
+        tone.append('very polite')
     elif f == 2:
-        tone.append('friendly')
+        tone.append('polite')
     elif f == 1:
-        tone.append('slightly reserved')
+        tone.append('slightly blunt')
     else:
-        tone.append('reserved')
+        tone.append('blunt')
 
     # Professionalism mapping (0-2)
     if p == 2:
@@ -481,6 +532,30 @@ def update_summary(*args):
         tone.append('occasionally coarse')
     else:
         tone.append('clean language')
+
+    # Humor (0-2)
+    if h == 2:
+        tone.append('very humorous')
+    elif h == 1:
+        tone.append('light humour')
+    else:
+        tone.append('no humour')
+
+    # Sarcasm (0-2)
+    if s == 2:
+        tone.append('strong sarcasm')
+    elif s == 1:
+        tone.append('mild sarcasm')
+    else:
+        tone.append('no sarcasm')
+
+    # Introversion (0-2)
+    if i == 2:
+        tone.append('introverted')
+    elif i == 1:
+        tone.append('neutral extroversion')
+    else:
+        tone.append('extroverted')
 
     age_desc = f'age {a}'
     gender_desc = 'feminine' if g==2 else ('masculine' if g==0 else 'neutral')

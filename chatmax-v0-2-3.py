@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-2.py
+# File:        chatmax-v0-2-3.py
 # Author:      Colin Bond
-# Version:     0.2.2 (2023-10-20, addressed preference file merging issue)
+# Version:     0.2.3 (2023-10-20, added the ability for the user to hide timestamps in the chat display and show them again)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -41,25 +41,24 @@ def send_message():
     def build_personality_instructions():
         parts = []
         # core sliders
-        f = friendliness_var.get()        # now represents Politeness
+        f = friendliness_var.get()
         p = professionalism_var.get()
         r = profanity_var.get()
         a = age_var.get()
         g = gender_var.get()
-        # new sliders
         h = humor_var.get()
         s = sarcasm_var.get()
         i = introversion_var.get()
 
-        # Politeness (discrete 0-3)
+        # Friendliness (discrete 0-3)
         if f == 3:
-            parts.append('Be very polite and warm.')
+            parts.append('Be very friendly and warm.')
         elif f == 2:
-            parts.append('Be polite.')
+            parts.append('Be friendly.')
         elif f == 1:
-            parts.append('Be slightly curt but polite.')
+            parts.append('Be slightly reserved.')
         else:
-            parts.append('Be terse and to the point.')
+            parts.append('Be very reserved and concise.')
 
         # Professionalism (discrete 0-2)
         if p == 2:
@@ -69,7 +68,7 @@ def send_message():
         else:
             parts.append('Use casual language.')
 
-        # Profanity (discrete 0-2) -- but enforce age constraint: young voices should not use profanity
+        # Profanity (discrete 0-2), but enforce age constraint, young voices should not use profanity
         if a <= 15:
             # force no profanity for young ages
             parts.append('Do not use profanity; avoid coarse language due to youthful voice.')
@@ -122,7 +121,7 @@ def send_message():
     if personality_instruction:
         messages_for_gpt.append({"role": "system", "content": personality_instruction})
 
-    # If a preferences.txt file exists next to this script, append its contents as an additional system message. If not, create it
+    # If a preferences.txt file exists next to this script, append its contents as an additional system message.
     try:
         import os
         prefs_path = os.path.join(os.path.dirname(__file__), 'preferences.txt')
@@ -145,8 +144,15 @@ def send_message():
             msg = entry_item[1]
             messages_for_gpt.append({"role": "user" if role == "You" else "assistant", "content": msg})
 
-    # Add user message to chat UI immediately and insert AI placeholder
-    append_chat(f"You: {message}\n")
+    # Add user message to chat UI immediately (include timestamp if enabled) and insert AI placeholder
+    try:
+        if show_timestamps_var.get():
+            append_chat(f"You [{ts}]: {message}\n")
+        else:
+            append_chat(f"You: {message}\n")
+    except Exception:
+        # Fallback for older runtime states where the timestamp toggle may not exist
+        append_chat(f"You [{ts}]: {message}\n")
     append_chat(f"AI is typing...\n\n")
     entry.delete(0, tk.END)
     chat_area.see(tk.END)
@@ -183,7 +189,7 @@ def send_message():
                 if current_prefs:
                     gen_msgs.append({"role": "system", "content": "Existing preferences:\n" + current_prefs})
 
-                # Provide recent USER-only history as context (limit to last 8 user messages)
+                # Provide recent user-only history as context (limit to last 8 user messages)
                 # history entries may be (role, msg, ts) so don't unpack incorrectly
                 user_msgs = [item[1] for item in history if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0] == "You"]
                 for um in user_msgs[-8:]:
@@ -192,21 +198,17 @@ def send_message():
                 # Also include the current user message explicitly
                 gen_msgs.append({"role": "user", "content": message})
 
-                print("[prefs] Requesting extracted preferences from server; user_msgs_count=", len(user_msgs))
+                # Try to get extracted preferences from the server
                 try:
                     gen_resp = requests.post(endpoint, json={'messages': gen_msgs}, timeout=20)
-                    print("[prefs] extraction response status:", getattr(gen_resp, 'status_code', None))
                     gen_resp.raise_for_status()
                     gen_data = gen_resp.json()
-                    print("[prefs] extraction response keys:", list(gen_data.keys()) if isinstance(gen_data, dict) else type(gen_data))
                     extracted = gen_data.get('response', '').strip() if isinstance(gen_data, dict) else ''
                 except Exception as e:
-                    print(f"[prefs] extraction request failed: {e}")
                     extracted = ''
 
                 if extracted:
                     # Parse lines and merge with current_prefs (replace by key before ' is ' if present)
-                    print("[prefs] extracted from server:", repr(extracted))
                     new_lines = [l.strip() for l in extracted.splitlines() if l.strip()]
                     existing_lines = [l.strip() for l in (current_prefs.splitlines() if current_prefs else []) if l.strip()]
 
@@ -223,9 +225,6 @@ def send_message():
                         existing_map = {}
                         for ex in existing_lines:
                             existing_map[pref_key(ex)] = ex
-
-                        # show debug state before merge
-                        print('[prefs] existing_map before merge:', existing_map)
 
                         existing_map[k] = nl
 
@@ -265,7 +264,7 @@ def send_message():
             except Exception:
                 pass
 
-            # print("Payload message sent to server:", payload)
+            # Send user message to AI endpoint with personalized (pref and memory) payload
             response = requests.post(endpoint, json={'messages': payload}, timeout=30)
             response.raise_for_status()
             data = response.json()
@@ -323,7 +322,7 @@ def save_conversation():
     if not path:
         return
     try:
-        # Save history; ensure entries are serializable lists
+        # Save history, ensure entries are serializable lists
         serial = []
         for item in history:
             if isinstance(item, (list, tuple)):
@@ -396,13 +395,13 @@ def open_personality_window():
         return
     win = tk.Toplevel(root)
     win.title('Personality')
-    # Do not hardcode geometry so the window can adapt to scaling; set a reasonable minimum
+    # Do not hardcode geometry so the window can adapt to scaling, but with a reasonable minimum
     win.minsize(320, 300)
     open_personality_window.win = win
 
     tk.Label(win, text='Personality', font=(None, 12, 'bold')).pack(pady=(6,4))
 
-    tk.Label(win, text='Politeness (0=terse,1=slightly curt,2=polite,3=very polite)').pack(anchor='w', padx=8)
+    tk.Label(win, text='Friendliness (0=reserved,1=slightly,2=friendly,3=very)').pack(anchor='w', padx=8)
     tk.Scale(win, from_=0, to=3, orient=tk.HORIZONTAL, variable=friendliness_var).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Professionalism (0=casual,1=somewhat,2=professional)').pack(anchor='w', padx=8)
@@ -412,12 +411,11 @@ def open_personality_window():
     tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=profanity_var).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Age').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=13, to=90, orient=tk.HORIZONTAL, variable=age_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=5, to=127, orient=tk.HORIZONTAL, variable=age_var).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Gender (0=masculine,1=neutral,2=feminine)').pack(anchor='w', padx=8)
     tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=gender_var).pack(fill=tk.X, padx=8)
 
-    # New sliders: Humor, Sarcasm, Introversion
     tk.Label(win, text='Humour (0=none,1=light,2=high)').pack(anchor='w', padx=8)
     tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=humor_var).pack(fill=tk.X, padx=8)
 
@@ -488,7 +486,12 @@ def render_history():
             ts = ''
         else:
             continue
-        ts_text = f" [{ts}]" if ts else ''
+        # Respect the show_timestamps_var toggle (hide timestamps when unchecked).
+        try:
+            show_ts = show_timestamps_var.get()
+        except Exception:
+            show_ts = True
+        ts_text = f" [{ts}]" if (ts and show_ts) else ''
         chat_area.insert(tk.END, f"{role}{ts_text}: {msg}\n")
         if role == "AI":
             chat_area.insert(tk.END, "\n")
@@ -515,14 +518,20 @@ professionalism_var = tk.IntVar(value=1)
 profanity_var = tk.IntVar(value=0)
 age_var = tk.IntVar(value=30)
 gender_var = tk.IntVar(value=1)
-# New personality sliders
 humor_var = tk.IntVar(value=0)
 sarcasm_var = tk.IntVar(value=0)
 introversion_var = tk.IntVar(value=1)
 
+# Show timestamps toggle
+show_timestamps_var = tk.BooleanVar(value=True)
+
 # Live summary label in main UI (updated by personality window)
-summary_label = tk.Label(root, text="Summary: polite, somewhat professional, clean language, no humour, no sarcasm, neutral extroversion, age 30, neutral", wraplength=400, justify='left')
+summary_label = tk.Label(root, text="Summary: friendly, somewhat professional, clean language, no humour, no sarcasm, neutral extroversion, age 30, neutral", wraplength=400, justify='left')
 summary_label.pack(padx=8, pady=(4,6))
+
+# Toggle to show/hide timestamps in the chat display
+show_ts_cb = tk.Checkbutton(root, text='Show timestamps', variable=show_timestamps_var, command=render_history)
+show_ts_cb.pack(padx=8, pady=(0,6), anchor='w')
 
 def update_summary(*args):
     f = friendliness_var.get()
@@ -534,15 +543,15 @@ def update_summary(*args):
     s = sarcasm_var.get()
     i = introversion_var.get()
     tone = []
-    # Politeness mapping (0-3)
+    # Friendliness mapping (0-3)
     if f == 3:
-        tone.append('very polite')
+        tone.append('very friendly')
     elif f == 2:
-        tone.append('polite')
+        tone.append('friendly')
     elif f == 1:
-        tone.append('slightly blunt')
+        tone.append('slightly reserved')
     else:
-        tone.append('blunt')
+        tone.append('reserved')
 
     # Professionalism mapping (0-2)
     if p == 2:
@@ -585,7 +594,7 @@ def update_summary(*args):
         tone.append('extroverted')
 
     age_desc = f'age {a}'
-    gender_desc = 'feminine' if g==2 else ('masculine' if g==0 else 'neutral')
+    gender_desc = 'feminine' if g==2 else ('masculine' if g==0 else 'gender neutral')
     summary_label.config(text='Summary: ' + ', '.join(tone) + f', {age_desc}, {gender_desc}')
 
 

@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-1.py
+# File:        chatmax-v0-2-2.py
 # Author:      Colin Bond
-# Version:     0.2.1 (2023-10-17, added a few new personality sliders)
+# Version:     0.2.2 (2023-10-20, addressed preference file merging issue)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -122,7 +122,7 @@ def send_message():
     if personality_instruction:
         messages_for_gpt.append({"role": "system", "content": personality_instruction})
 
-    # If a preferences.txt file exists next to this script, append its contents as an additional system message
+    # If a preferences.txt file exists next to this script, append its contents as an additional system message. If not, create it
     try:
         import os
         prefs_path = os.path.join(os.path.dirname(__file__), 'preferences.txt')
@@ -131,6 +131,10 @@ def send_message():
                 prefs_text = pf.read().strip()
                 if prefs_text:
                     messages_for_gpt.append({"role": "system", "content": prefs_text})
+        else:
+            # Create an empty preferences.txt file
+            with open(prefs_path, 'w', encoding='utf-8') as pf:
+                pf.write('')
     except Exception:
         # Ignore preference-load errors; do not change payload if reading fails
         pass
@@ -152,11 +156,11 @@ def send_message():
     entry.config(state=tk.DISABLED)
 
     def worker(payload):
-        try:
+        try:            
             # Attempt to extract new/updated preferences from recent conversation and merge into PREFS_PATH
             try:
                 # Load current prefs (may be empty)
-                current_prefs = ''
+                current_prefs = ''                
                 if os.path.exists(PREFS_PATH):
                     try:
                         with open(PREFS_PATH, 'r', encoding='utf-8') as pf:
@@ -180,21 +184,29 @@ def send_message():
                     gen_msgs.append({"role": "system", "content": "Existing preferences:\n" + current_prefs})
 
                 # Provide recent USER-only history as context (limit to last 8 user messages)
-                user_msgs = [msg for role, msg in history if role == "You"]
+                # history entries may be (role, msg, ts) so don't unpack incorrectly
+                user_msgs = [item[1] for item in history if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0] == "You"]
                 for um in user_msgs[-8:]:
                     gen_msgs.append({"role": "user", "content": um})
 
                 # Also include the current user message explicitly
                 gen_msgs.append({"role": "user", "content": message})
 
-                print("Requesting extracted preferences from server")
-                gen_resp = requests.post(endpoint, json={'messages': gen_msgs}, timeout=20)
-                gen_resp.raise_for_status()
-                gen_data = gen_resp.json()
-                extracted = gen_data.get('response', '').strip()
+                print("[prefs] Requesting extracted preferences from server; user_msgs_count=", len(user_msgs))
+                try:
+                    gen_resp = requests.post(endpoint, json={'messages': gen_msgs}, timeout=20)
+                    print("[prefs] extraction response status:", getattr(gen_resp, 'status_code', None))
+                    gen_resp.raise_for_status()
+                    gen_data = gen_resp.json()
+                    print("[prefs] extraction response keys:", list(gen_data.keys()) if isinstance(gen_data, dict) else type(gen_data))
+                    extracted = gen_data.get('response', '').strip() if isinstance(gen_data, dict) else ''
+                except Exception as e:
+                    print(f"[prefs] extraction request failed: {e}")
+                    extracted = ''
 
                 if extracted:
                     # Parse lines and merge with current_prefs (replace by key before ' is ' if present)
+                    print("[prefs] extracted from server:", repr(extracted))
                     new_lines = [l.strip() for l in extracted.splitlines() if l.strip()]
                     existing_lines = [l.strip() for l in (current_prefs.splitlines() if current_prefs else []) if l.strip()]
 
@@ -206,24 +218,39 @@ def send_message():
 
                     for nl in new_lines:
                         k = pref_key(nl)
-                        replaced = False
-                        for i, ex in enumerate(existing_lines):
-                            if pref_key(ex) == k:
-                                existing_lines[i] = nl
-                                replaced = True
-                                break
-                        if not replaced:
-                            existing_lines.append(nl)
+                        # build a map of existing preferences keyed by canonical key
+                        # so updates replace the correct entry without accidental collisions
+                        existing_map = {}
+                        for ex in existing_lines:
+                            existing_map[pref_key(ex)] = ex
+
+                        # show debug state before merge
+                        print('[prefs] existing_map before merge:', existing_map)
+
+                        existing_map[k] = nl
+
+                        # Rebuild existing_lines preserving insertion order (new/updated at end if new)
+                        existing_lines = list(existing_map.values())
 
                     # Join and truncate to PREFS_MAX_CHARS
                     merged = '\n'.join(existing_lines).strip()
+                    print('[prefs] merged preferences:', repr(merged))
                     if len(merged) > PREFS_MAX_CHARS:
                         merged = merged[:PREFS_MAX_CHARS]
                     try:
-                        with open(PREFS_PATH, 'w', encoding='utf-8') as pf:
+                        # Write atomically: write to a temp file then replace
+                        tmp_path = PREFS_PATH + '.tmp'
+                        with open(tmp_path, 'w', encoding='utf-8') as pf:
                             pf.write(merged)
-                    except Exception:
-                        pass
+                            pf.flush()
+                            try:
+                                os.fsync(pf.fileno())
+                            except Exception:
+                                pass
+                        os.replace(tmp_path, PREFS_PATH)
+                        print(f"[prefs] wrote merged preferences to {PREFS_PATH}")
+                    except Exception as e:
+                        print(f"[prefs] failed to write preferences: {e}")
             except Exception:
                 # If anything in prefs extraction fails, continue without blocking the main request
                 pass
@@ -238,7 +265,7 @@ def send_message():
             except Exception:
                 pass
 
-            print("Payload message sent to server:", payload)
+            # print("Payload message sent to server:", payload)
             response = requests.post(endpoint, json={'messages': payload}, timeout=30)
             response.raise_for_status()
             data = response.json()

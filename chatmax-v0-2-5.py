@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-4.py
+# File:        chatmax-v0-2-5.py
 # Author:      Colin Bond
-# Version:     0.2.4 (2023-10-20, added the ability for the user to hide timestamps in the chat display and show them again)
+# Version:     0.2.5 (2023-10-20, added presets saving/loading functionality)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -424,19 +424,42 @@ def open_personality_window():
         'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 2),
     }
 
-    # Try to load user presets and last selection from presets.json (next to script)
+    # Presets file/dir paths
     presets_path = os.path.join(os.path.dirname(__file__), 'presets.json')
+    presets_dir = os.path.join(os.path.dirname(__file__), 'presets')
+    try:
+        os.makedirs(presets_dir, exist_ok=True)
+    except Exception:
+        pass
+
+    # Load any per-file presets from the presets/ directory
+    try:
+        for fname in os.listdir(presets_dir):
+            if not fname.lower().endswith('.json'):
+                continue
+            name = os.path.splitext(fname)[0]
+            full = os.path.join(presets_dir, fname)
+            try:
+                with open(full, 'r', encoding='utf-8') as pf:
+                    loaded = json.load(pf)
+                # Support either a list of values or an object with 'values'
+                vals = None
+                if isinstance(loaded, list):
+                    vals = loaded
+                elif isinstance(loaded, dict) and 'values' in loaded:
+                    vals = loaded.get('values')
+                if vals and len(vals) >= 8:
+                    presets[name] = tuple(int(x) for x in vals[:8])
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Try to load last_selected from presets.json (keeps only the last selection)
     try:
         if os.path.exists(presets_path):
             with open(presets_path, 'r', encoding='utf-8') as pf:
                 loaded = json.load(pf)
-            file_presets = loaded.get('presets', {}) if isinstance(loaded, dict) else {}
-            for k, v in file_presets.items():
-                # Ensure stored values are tuples of ints
-                try:
-                    presets[k] = tuple(int(x) for x in v)
-                except Exception:
-                    pass
             last_selected = loaded.get('last_selected') if isinstance(loaded, dict) else None
         else:
             last_selected = None
@@ -477,7 +500,72 @@ def open_personality_window():
     tk.Label(win, text='Presets').pack(anchor='w', padx=8, pady=(4,0))
     # OptionMenu options: show 'Custom' plus all preset names
     option_names = ['Custom'] + list(presets.keys())
-    tk.OptionMenu(win, preset_var, *option_names, command=apply_preset).pack(fill=tk.X, padx=8)
+    preset_menu = tk.OptionMenu(win, preset_var, *option_names, command=apply_preset)
+    preset_menu.pack(fill=tk.X, padx=8)
+
+    def update_preset_menu():
+        # Rebuild the OptionMenu items to reflect current presets dict
+        menu = preset_menu['menu']
+        menu.delete(0, 'end')
+        menu.add_command(label='Custom', command=lambda v='Custom': preset_var.set(v))
+        for name in sorted(presets.keys()):
+            menu.add_command(label=name, command=lambda v=name: (preset_var.set(v), apply_preset(v)))
+
+    def save_preset_to_file():
+        # Ask for a filename to save the current slider configuration
+        tpl = current_values_tuple()
+        name = tk.simpledialog.askstring('Save preset', 'Preset name (file will be saved as <name>.json):')
+        if not name:
+            return
+        fname = name.strip()
+        if not fname:
+            return
+        full = os.path.join(presets_dir, f"{fname}.json")
+        data = {'values': list(tpl)}
+        try:
+            tmp = full + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as pf:
+                json.dump(data, pf, ensure_ascii=False, indent=2)
+                pf.flush()
+                try:
+                    os.fsync(pf.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, full)
+            # Add to presets dict and refresh menu
+            presets[fname] = tpl
+            update_preset_menu()
+            preset_var.set(fname)
+            apply_preset(fname)
+        except Exception as e:
+            messagebox.showerror('Save error', str(e))
+
+    def load_preset_from_file():
+        path = filedialog.askopenfilename(initialdir=presets_dir, filetypes=[('JSON files','*.json'), ('All files','*.*')])
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as pf:
+                loaded = json.load(pf)
+            vals = None
+            if isinstance(loaded, list):
+                vals = loaded
+            elif isinstance(loaded, dict) and 'values' in loaded:
+                vals = loaded.get('values')
+            if vals and len(vals) >= 8:
+                name = os.path.splitext(os.path.basename(path))[0]
+                presets[name] = tuple(int(x) for x in vals[:8])
+                update_preset_menu()
+                preset_var.set(name)
+                apply_preset(name)
+        except Exception as e:
+            messagebox.showerror('Load error', str(e))
+
+    # Small controls to save/load preset files
+    ctrl_frame = tk.Frame(win)
+    ctrl_frame.pack(fill=tk.X, padx=8, pady=(4,6))
+    tk.Button(ctrl_frame, text='Save Preset...', command=save_preset_to_file).pack(side=tk.LEFT)
+    tk.Button(ctrl_frame, text='Load Preset...', command=load_preset_from_file).pack(side=tk.LEFT, padx=(6,0))
 
     # Helper to read current slider values as a tuple
     def current_values_tuple():

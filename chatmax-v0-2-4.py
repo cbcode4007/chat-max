@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-3.py
+# File:        chatmax-v0-2-4.py
 # Author:      Colin Bond
-# Version:     0.2.3 (2023-10-20, added the ability for the user to hide timestamps in the chat display and show them again)
+# Version:     0.2.4 (2023-10-20, added the ability for the user to hide timestamps in the chat display and show them again)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -147,12 +147,12 @@ def send_message():
     # Add user message to chat UI immediately (include timestamp if enabled) and insert AI placeholder
     try:
         if show_timestamps_var.get():
-            append_chat(f"You [{ts}]: {message}\n")
+            append_chat(f"You [{ts}]: {message}\n\n")
         else:
-            append_chat(f"You: {message}\n")
+            append_chat(f"You: {message}\n\n")
     except Exception:
         # Fallback for older runtime states where the timestamp toggle may not exist
-        append_chat(f"You [{ts}]: {message}\n")
+        append_chat(f"You [{ts}]: {message}\n\n")
     append_chat(f"AI is typing...\n\n")
     entry.delete(0, tk.END)
     chat_area.see(tk.END)
@@ -160,6 +160,10 @@ def send_message():
     # Disable send controls while awaiting a reply
     send_btn.config(state=tk.DISABLED)
     entry.config(state=tk.DISABLED)
+    try:
+        show_ts_cb.config(state=tk.DISABLED)
+    except Exception:
+        pass
 
     def worker(payload):
         try:            
@@ -282,6 +286,10 @@ def send_message():
                 render_history()
                 send_btn.config(state=tk.NORMAL)
                 entry.config(state=tk.NORMAL)
+                try:
+                    show_ts_cb.config(state=tk.NORMAL)
+                except Exception:
+                    pass
 
             root.after(0, on_success)
         except Exception as e:
@@ -297,6 +305,10 @@ def send_message():
                 render_history()
                 send_btn.config(state=tk.NORMAL)
                 entry.config(state=tk.NORMAL)
+                try:
+                    show_ts_cb.config(state=tk.NORMAL)
+                except Exception:
+                    pass
 
             root.after(0, on_error)
 
@@ -401,55 +413,201 @@ def open_personality_window():
 
     tk.Label(win, text='Personality', font=(None, 12, 'bold')).pack(pady=(6,4))
 
+    # Presets map: name -> tuple of slider values
+    presets = {
+        'Default AI': (2, 1, 0, 30, 1, 0, 0, 1),
+        'Helpful Professional': (2, 2, 0, 35, 1, 0, 0, 1),
+        'Casual Friendly': (3, 0, 0, 25, 1, 1, 0, 0),
+        'Playful Sarcastic': (2, 0, 1, 18, 1, 2, 2, 1),
+        'Child-Friendly': (3, 1, 0, 12, 1, 0, 0, 1),
+        'Stoic Professional': (1, 2, 0, 40, 1, 0, 0, 2),
+        'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 2),
+    }
+
+    # Try to load user presets and last selection from presets.json (next to script)
+    presets_path = os.path.join(os.path.dirname(__file__), 'presets.json')
+    try:
+        if os.path.exists(presets_path):
+            with open(presets_path, 'r', encoding='utf-8') as pf:
+                loaded = json.load(pf)
+            file_presets = loaded.get('presets', {}) if isinstance(loaded, dict) else {}
+            for k, v in file_presets.items():
+                # Ensure stored values are tuples of ints
+                try:
+                    presets[k] = tuple(int(x) for x in v)
+                except Exception:
+                    pass
+            last_selected = loaded.get('last_selected') if isinstance(loaded, dict) else None
+        else:
+            last_selected = None
+    except Exception:
+        last_selected = None
+
+    # We'll include a 'Custom' label for when slider values don't match any preset
+    preset_var = tk.StringVar(value=last_selected if (last_selected in presets) else 'Custom')
+    # Update the shared summary label and the local window label
+    def apply_changes():
+        # Read current slider vars into the shared summary and local summary
+        update_summary()
+        try:
+            win_summary.config(text=summary_label.cget('text'))
+        except tk.TclError:
+            pass
+
+    def apply_preset(name):
+        # Apply the preset tuple to the personality variables and update summaries
+        vals = presets.get(name)
+        if not vals:
+            return
+        try:
+            friendliness_var.set(vals[0])
+            professionalism_var.set(vals[1])
+            profanity_var.set(vals[2])
+            age_var.set(vals[3])
+            gender_var.set(vals[4])
+            humor_var.set(vals[5])
+            sarcasm_var.set(vals[6])
+            introversion_var.set(vals[7])
+        except Exception:
+            # If any var is missing for some reason, ignore and continue
+            pass
+        # Update the shared and local summaries
+        apply_changes()
+
+    tk.Label(win, text='Presets').pack(anchor='w', padx=8, pady=(4,0))
+    # OptionMenu options: show 'Custom' plus all preset names
+    option_names = ['Custom'] + list(presets.keys())
+    tk.OptionMenu(win, preset_var, *option_names, command=apply_preset).pack(fill=tk.X, padx=8)
+
+    # Helper to read current slider values as a tuple
+    def current_values_tuple():
+        return (
+            int(friendliness_var.get()), int(professionalism_var.get()), int(profanity_var.get()),
+            int(age_var.get()), int(gender_var.get()), int(humor_var.get()), int(sarcasm_var.get()), int(introversion_var.get())
+        )
+
+    def find_matching_preset(tpl):
+        for name, vals in presets.items():
+            if tuple(vals) == tuple(tpl):
+                return name
+        return 'Custom'
+
+    # Called when a Scale is manipulated by the user. Update summary and preset selector.
+    def on_slider_change(_=None):
+        try:
+            update_summary()
+        except Exception:
+            pass
+        try:
+            # update local summary label if present
+            win_summary.config(text=summary_label.cget('text'))
+        except Exception:
+            pass
+        try:
+            preset_var.set(find_matching_preset(current_values_tuple()))
+        except Exception:
+            try:
+                preset_var.set('Custom')
+            except Exception:
+                pass
+
     tk.Label(win, text='Friendliness (0=reserved,1=slightly,2=friendly,3=very)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=3, orient=tk.HORIZONTAL, variable=friendliness_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=0, to=3, orient=tk.HORIZONTAL, variable=friendliness_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Professionalism (0=casual,1=somewhat,2=professional)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=professionalism_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=professionalism_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Profanity (0=clean,1=moderate,2=high)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=profanity_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=profanity_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Age').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=5, to=127, orient=tk.HORIZONTAL, variable=age_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=5, to=127, orient=tk.HORIZONTAL, variable=age_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Gender (0=masculine,1=neutral,2=feminine)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=gender_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=gender_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Humour (0=none,1=light,2=high)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=humor_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=humor_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Sarcasm (0=none,1=mild,2=strong)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=sarcasm_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=sarcasm_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     tk.Label(win, text='Introversion (0=extroverted,1=neutral,2=introverted)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=introversion_var).pack(fill=tk.X, padx=8)
+    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=introversion_var, command=on_slider_change).pack(fill=tk.X, padx=8)
 
     # Summary shown in the window too (wraplength will be updated on resize)
     win_summary = tk.Label(win, text='', wraplength=280, justify='left')
     win_summary.pack(padx=8, pady=10, fill=tk.X)
 
     # Update the shared summary label and the local window label
-    def update_both(*args):
+    def apply_changes():
+        # Read current slider vars into the shared summary and local summary
         update_summary()
-        if win_summary:
+        try:
             win_summary.config(text=summary_label.cget('text'))
-
-    # Register traces once so update_both runs when any var changes
-    for var in (friendliness_var, professionalism_var, profanity_var, age_var, gender_var,
-                humor_var, sarcasm_var, introversion_var):
-        var.trace_add('write', update_both)
+        except tk.TclError:
+            pass
 
     # Initialize window summary
     win_summary.config(text=summary_label.cget('text'))
+
+    # Ensure the preset selector matches the current slider values on open
+    def current_values_tuple():
+        return (
+            int(friendliness_var.get()), int(professionalism_var.get()), int(profanity_var.get()),
+            int(age_var.get()), int(gender_var.get()), int(humor_var.get()), int(sarcasm_var.get()), int(introversion_var.get())
+        )
+
+    def find_matching_preset(tpl):
+        for name, vals in presets.items():
+            if tuple(vals) == tuple(tpl):
+                return name
+        return 'Custom'
+
+    # If last_selected was saved and exists, keep it; otherwise try to match current sliders
+    if preset_var.get() not in presets:
+        preset_var.set(find_matching_preset(current_values_tuple()))
 
     # Make the summary wrap adaptively when the Toplevel is resized
     def on_win_configure(event):
         # leave some padding (16px each side)
         new_wrap = max(100, event.width - 32)
-        win_summary.config(wraplength=new_wrap)
+        try:
+            win_summary.config(wraplength=new_wrap)
+        except tk.TclError:
+            # If the widget no longer exists, ignore
+            pass
 
     win.bind('<Configure>', on_win_configure)
+
+    # Save presets and last selection when the window closes
+    def on_close():
+        # Determine which preset best matches current sliders
+        tpl = current_values_tuple()
+        matched = find_matching_preset(tpl)
+        last = matched if matched in presets else 'Custom'
+        data = {'presets': {k: list(v) for k, v in presets.items()}, 'last_selected': last}
+        try:
+            tmp_path = presets_path + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as pf:
+                json.dump(data, pf, ensure_ascii=False, indent=2)
+                pf.flush()
+                try:
+                    os.fsync(pf.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_path, presets_path)
+        except Exception as e:
+            print('[presets] failed to write presets:', e)
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    win.protocol('WM_DELETE_WINDOW', on_close)
+
+    # Buttons were intentionally removed to allow immediate application of changes
+    # (apply_changes and apply_preset remain available programmatically)
 
 personality_menu = tk.Menu(menubar, tearoff=0)
 personality_menu.add_command(label='Configure...', command=open_personality_window)
@@ -492,7 +650,7 @@ def render_history():
         except Exception:
             show_ts = True
         ts_text = f" [{ts}]" if (ts and show_ts) else ''
-        chat_area.insert(tk.END, f"{role}{ts_text}: {msg}\n")
+        chat_area.insert(tk.END, f"{role}{ts_text}: {msg}\n\n")
         if role == "AI":
             chat_area.insert(tk.END, "\n")
     chat_area.see(tk.END)

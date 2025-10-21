@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-5.py
+# File:        chatmax-v0-2-6.py
 # Author:      Colin Bond
-# Version:     0.2.5 (2023-10-20, added presets saving/loading functionality)
+# Version:     0.2.6 (2025*-10-21, added interface improvements and changes to make things clearer/more convenient like confirm dialogs)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -19,6 +19,17 @@ PREFS_MAX_CHARS = 2000
 
 endpoint = 'http://192.168.123.128:5001/chat'
 
+# Built-in presets (shared so they can be referenced at startup)
+DEFAULT_PRESETS = {
+    'Default AI': (2, 1, 0, 30, 1, 0, 0, 1),
+    'Helpful Professional': (2, 2, 0, 35, 1, 0, 0, 1),
+    'Casual Friendly': (3, 0, 0, 25, 1, 1, 0, 0),
+    'Playful Sarcastic': (2, 0, 1, 18, 1, 2, 2, 1),
+    'Child-Friendly': (3, 1, 0, 12, 1, 0, 0, 1),
+    'Stoic Professional': (1, 2, 0, 40, 1, 0, 0, 2),
+    'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 2),
+}
+
 def send_message():
     message = entry.get()
     if not message.strip():
@@ -27,14 +38,22 @@ def send_message():
     # Add to history (keep last 10 messages). Each entry is (role, message, iso_timestamp)
     ts = time.strftime('%Y-%m-%d %H:%M:%S')
     history.append(("You", message, ts))
+    # Also append to the untrimmed full_history for persistence
+    full_history.append(("You", message, ts))
     if len(history) > 10:
         history.pop(0)
 
-    # Convert GUI history to ChatGPT format WITH system role
-    # Start with a neutral, blank-slate system instruction. All tone/style should be provided
+    # Determine the active preset label (use in UI instead of generic 'AI')
+    try:
+        preset_label = determine_active_preset_name()
+    except Exception:
+        preset_label = 'AI'
+
+    # Convert GUI history to ChatGPT format under system role
+    # Start with a neutral, blank-slate system instruction, all tone/style should be provided
     # by subsequent system messages (e.g., personality_instruction and preferences).
     messages_for_gpt = [{"role": "system", "content": (
-        "You are a concise chat partner. Do not assume or apply any particular personality or tone, besides keeping concise. Follow any additional system instructions that are appended to this conversation to determine tone, style, and behavior. If no further instructions are provided, respond neutrally and helpfully."
+        "You are a user's chat partner. Do not assume or apply any particular personality or tone, besides keeping concise. Follow any additional system instructions that are listed below to determine tone, style, and behavior."
     )}]
 
     # Personality instructions built from sliders (appended as another system message)
@@ -50,7 +69,7 @@ def send_message():
         s = sarcasm_var.get()
         i = introversion_var.get()
 
-        # Friendliness (discrete 0-3)
+        # Friendliness (0-3)
         if f == 3:
             parts.append('Be very friendly and warm.')
         elif f == 2:
@@ -60,7 +79,7 @@ def send_message():
         else:
             parts.append('Be very reserved and concise.')
 
-        # Professionalism (discrete 0-2)
+        # Professionalism (0-2)
         if p == 2:
             parts.append('Maintain a professional tone.')
         elif p == 1:
@@ -68,9 +87,9 @@ def send_message():
         else:
             parts.append('Use casual language.')
 
-        # Profanity (discrete 0-2), but enforce age constraint, young voices should not use profanity
+        # Profanity (0-2), but enforce age constraint, young voices should not use profanity
         if a <= 15:
-            # force no profanity for young ages
+            # force no profanity for young ages regardless of setting
             parts.append('Do not use profanity; avoid coarse language due to youthful voice.')
         else:
             if r == 2:
@@ -80,10 +99,10 @@ def send_message():
             else:
                 parts.append('No profanity; use clean language.')
 
-        # Age
+        # Age (5-127)
         parts.append(f'Adopt the voice of someone aged {a}.')
 
-        # Gender (discrete 0-2)
+        # Gender (0-2)
         if g == 2:
             parts.append('Use a feminine voice/wording.')
         elif g == 0:
@@ -107,13 +126,13 @@ def send_message():
         else:
             parts.append('Do not use sarcasm; be literal and sincere.')
 
-        # Introversion (0-2): 0=extroverted,1=neutral,2=introverted
-        if i == 2:
-            parts.append("Favor solitary/quiet hobbies and mention mild nervousness or reserve in social situations when relevant. Do not be excitable, for instance lay off of exclamation marks unless absolutely necessary.")
-        elif i == 1:
-            parts.append('No particular bias toward introversion or extroversion.')
-        else:
-            parts.append('Favor social/outgoing hobbies and confident wording. Be excitable and enthusiastic where appropriate, expressing with exclamation marks more often than not.')
+        # Extroversion (0-2)
+            if i == 2:
+                parts.append('Favor social/outgoing hobbies and confident wording. Be excitable and enthusiastic where appropriate, expressing with exclamation marks more often than not.')
+            elif i == 1:
+                parts.append('No particular bias toward extroversion or introversion.')
+            else:
+                parts.append("Favor solitary/quiet hobbies and mention mild nervousness or reserve in social situations when relevant. Do not be excitable, for instance lay off of exclamation marks unless absolutely necessary.")
 
         return ' '.join(parts)
 
@@ -121,7 +140,7 @@ def send_message():
     if personality_instruction:
         messages_for_gpt.append({"role": "system", "content": personality_instruction})
 
-    # If a preferences.txt file exists next to this script, append its contents as an additional system message.
+    # If a preferences.txt file exists next to this script, append its contents as an additional system message
     try:
         import os
         prefs_path = os.path.join(os.path.dirname(__file__), 'preferences.txt')
@@ -135,10 +154,10 @@ def send_message():
             with open(prefs_path, 'w', encoding='utf-8') as pf:
                 pf.write('')
     except Exception:
-        # Ignore preference-load errors; do not change payload if reading fails
+        # Ignore preference-load errors, do not change payload if this reading fails
         pass
+    # Add each entry under short term history to the payload
     for entry_item in history:
-        # backward-compat: entry_item may be (role, msg) or (role, msg, ts)
         if len(entry_item) >= 2:
             role = entry_item[0]
             msg = entry_item[1]
@@ -153,7 +172,7 @@ def send_message():
     except Exception:
         # Fallback for older runtime states where the timestamp toggle may not exist
         append_chat(f"You [{ts}]: {message}\n\n")
-    append_chat(f"AI is typing...\n\n")
+    append_chat(f"{preset_label} is thinking...\n\n")
     entry.delete(0, tk.END)
     chat_area.see(tk.END)
 
@@ -162,6 +181,12 @@ def send_message():
     entry.config(state=tk.DISABLED)
     try:
         show_ts_cb.config(state=tk.DISABLED)
+    except Exception:
+        pass
+    # Mark as having unsaved changes (a new outgoing message)
+    try:
+        global unsaved_changes
+        unsaved_changes = True
     except Exception:
         pass
 
@@ -178,7 +203,7 @@ def send_message():
                     except Exception:
                         current_prefs = ''
 
-                # Build a prompt to extract concise preference lines from the USER's messages only.
+                # Build a prompt to extract concise preference lines, from the user's messages only
                 gen_msgs = [
                     {"role": "system", "content": (
                         "Extract concise user preference statements from the conversation. "
@@ -212,7 +237,7 @@ def send_message():
                     extracted = ''
 
                 if extracted:
-                    # Parse lines and merge with current_prefs (replace by key before ' is ' if present)
+                    # Parse extracted pref lines and merge with current_prefs (replace by key before ' is ' if present)
                     new_lines = [l.strip() for l in extracted.splitlines() if l.strip()]
                     existing_lines = [l.strip() for l in (current_prefs.splitlines() if current_prefs else []) if l.strip()]
 
@@ -237,11 +262,10 @@ def send_message():
 
                     # Join and truncate to PREFS_MAX_CHARS
                     merged = '\n'.join(existing_lines).strip()
-                    print('[prefs] merged preferences:', repr(merged))
                     if len(merged) > PREFS_MAX_CHARS:
                         merged = merged[:PREFS_MAX_CHARS]
                     try:
-                        # Write atomically: write to a temp file then replace
+                        # Write atomically, by writing to a temp file then replacing
                         tmp_path = PREFS_PATH + '.tmp'
                         with open(tmp_path, 'w', encoding='utf-8') as pf:
                             pf.write(merged)
@@ -251,9 +275,8 @@ def send_message():
                             except Exception:
                                 pass
                         os.replace(tmp_path, PREFS_PATH)
-                        print(f"[prefs] wrote merged preferences to {PREFS_PATH}")
-                    except Exception as e:
-                        print(f"[prefs] failed to write preferences: {e}")
+                    except Exception:
+                        pass
             except Exception:
                 # If anything in prefs extraction fails, continue without blocking the main request
                 pass
@@ -274,9 +297,11 @@ def send_message():
             data = response.json()
             ai_reply = data.get('response', '')
 
-            # Update history (append AI reply)
+            # Update history (append assistant reply using the active preset label)
             ts = time.strftime('%Y-%m-%d %H:%M:%S')
-            history.append(("AI", ai_reply, ts))
+            history.append((preset_label, ai_reply, ts))
+            # Also append to the untrimmed full_history for persistence
+            full_history.append((preset_label, ai_reply, ts))
             if len(history) > 10:
                 history.pop(0)
 
@@ -295,9 +320,10 @@ def send_message():
         except Exception as e:
             err_text = f"Error: {str(e)}"
 
-            # Append an error entry to history
+            # Append an error entry to history (use preset label)
             ts = time.strftime('%Y-%m-%d %H:%M:%S')
-            history.append(("AI", err_text, ts))
+            history.append((preset_label, err_text, ts))
+            full_history.append((preset_label, err_text, ts))
             if len(history) > 10:
                 history.pop(0)
 
@@ -324,32 +350,67 @@ def load_history():
 def new_conversation():
     if messagebox.askyesno("New Conversation", "Start a new conversation? This will clear the current chat history."):
         history.clear()
+        full_history.clear()
         # Re-render (will clear the display and keep widget state consistent)
         render_history()
         set_conversation_title('New Conversation')
+        # Reset saved-state tracking
+        try:
+            global current_conversation_path, unsaved_changes
+            current_conversation_path = None
+            unsaved_changes = False
+        except Exception:
+            pass
 
 
 def save_conversation():
-    path = filedialog.asksaveasfilename(defaultextension='.json', filetypes=[('JSON files','*.json'), ('All files','*.*')])
-    if not path:
-        return
+    # Default to the 'conversations' folder next to the script
+    conv_dir = os.path.join(os.path.dirname(__file__), 'conversations')
     try:
-        # Save history, ensure entries are serializable lists
+        os.makedirs(conv_dir, exist_ok=True)
+    except Exception:
+        pass
+    path = filedialog.asksaveasfilename(initialdir=conv_dir, defaultextension='.json', filetypes=[('JSON files','*.json'), ('All files','*.*')])
+    if not path:
+        return False
+    try:
+        # Save the full, untrimmed conversation (full_history)
         serial = []
-        for item in history:
+        for item in full_history:
             if isinstance(item, (list, tuple)):
                 serial.append(list(item))
             else:
                 serial.append([str(item)])
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(serial, f, ensure_ascii=False, indent=2)
+        # Update conversation title to the saved filename (strip directory and extension)
+        try:
+            fname = os.path.basename(path)
+            set_conversation_title(fname)
+        except Exception:
+            pass
+        # update saved-state tracking
+        try:
+            global current_conversation_path, unsaved_changes
+            current_conversation_path = path
+            unsaved_changes = False
+        except Exception:
+            pass
         messagebox.showinfo('Saved', f'Conversation saved to {path}')
+        return True
     except Exception as e:
         messagebox.showerror('Save error', str(e))
+        return False
 
 
 def load_conversation_file():
-    path = filedialog.askopenfilename(filetypes=[('JSON files','*.json'), ('All files','*.*')])
+    # Default to the 'conversations' folder next to the script
+    conv_dir = os.path.join(os.path.dirname(__file__), 'conversations')
+    try:
+        os.makedirs(conv_dir, exist_ok=True)
+    except Exception:
+        pass
+    path = filedialog.askopenfilename(initialdir=conv_dir, filetypes=[('JSON files','*.json'), ('All files','*.*')])
     if not path:
         return
     try:
@@ -358,6 +419,7 @@ def load_conversation_file():
         # Expecting a list of [role, message] pairs
         if isinstance(data, list):
             history.clear()
+            full_history.clear()
             for item in data:
                 # item may be [role, message] or [role, message, timestamp]
                 if isinstance(item, list) or isinstance(item, tuple):
@@ -366,8 +428,16 @@ def load_conversation_file():
                         msg = item[1]
                         ts = item[2] if len(item) > 2 else time.strftime('%Y-%m-%d %H:%M:%S')
                         history.append((role, msg, ts))
+                        full_history.append((role, msg, ts))
             render_history()
             set_conversation_title(os.path.basename(path))
+            # update saved-state tracking
+            try:
+                global current_conversation_path, unsaved_changes
+                current_conversation_path = path
+                unsaved_changes = False
+            except Exception:
+                pass
             messagebox.showinfo('Loaded', f'Conversation loaded from {path}')
     except Exception as e:
         messagebox.showerror('Load error', str(e))
@@ -375,11 +445,14 @@ def load_conversation_file():
 
 def clear_prefs():
     try:
-        if os.path.exists(PREFS_PATH):
-            os.remove(PREFS_PATH)
-            messagebox.showinfo('Preferences cleared', 'preferences.txt deleted')
-        else:
+        if not os.path.exists(PREFS_PATH):
             messagebox.showinfo('Preferences', 'No preferences file to delete')
+            return
+        # Ask for confirmation before deleting the preferences file
+        if not messagebox.askyesno('Confirm', 'Are you sure you want to delete preferences.txt? This cannot be undone.'):
+            return
+        os.remove(PREFS_PATH)
+        messagebox.showinfo('Preferences cleared', 'preferences.txt deleted')
     except Exception as e:
         messagebox.showerror('Error', str(e))
 
@@ -395,9 +468,38 @@ file_menu.add_command(label='New', command=new_conversation)
 file_menu.add_command(label='Save', command=save_conversation)
 file_menu.add_command(label='Load', command=load_conversation_file)
 file_menu.add_separator()
-file_menu.add_command(label='Exit', command=root.quit)
-menubar.add_cascade(label='File', menu=file_menu)
+def on_exit():
+    # If there are unsaved changes, prompt the user to save
+    try:
+        if unsaved_changes:
+            resp = messagebox.askyesnocancel('Save before exit', 'You have unsaved changes. Save before exiting?')
+            # Yes -> attempt save; if save succeeds exit, otherwise abort
+            if resp is True:
+                ok = save_conversation()
+                if ok:
+                    root.destroy()
+                else:
+                    return
+            # No -> exit without saving
+            elif resp is False:
+                root.destroy()
+            # Cancel -> do nothing
+            else:
+                return
+        else:
+            root.destroy()
+    except Exception:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+file_menu.add_command(label='Exit', command=on_exit)
+menubar.add_cascade(label='Conversation', menu=file_menu)
 root.config(menu=menubar)
+
+# Prompt to save on window close
+root.protocol('WM_DELETE_WINDOW', on_exit)
 
 # Add Personality menu entry (opens a separate window)
 def open_personality_window():
@@ -413,7 +515,7 @@ def open_personality_window():
 
     tk.Label(win, text='Personality', font=(None, 12, 'bold')).pack(pady=(6,4))
 
-    # Presets map: name -> tuple of slider values
+    # Presets map - name: tuple of slider values
     presets = {
         'Default AI': (2, 1, 0, 30, 1, 0, 0, 1),
         'Helpful Professional': (2, 2, 0, 35, 1, 0, 0, 1),
@@ -426,13 +528,13 @@ def open_personality_window():
 
     # Presets file/dir paths
     presets_path = os.path.join(os.path.dirname(__file__), 'presets.json')
-    presets_dir = os.path.join(os.path.dirname(__file__), 'presets')
+    presets_dir = os.path.join(os.path.dirname(__file__), 'personalities')
     try:
         os.makedirs(presets_dir, exist_ok=True)
     except Exception:
         pass
 
-    # Load any per-file presets from the presets/ directory
+    # Load any per-file presets from the personalities/ directory
     try:
         for fname in os.listdir(presets_dir):
             if not fname.lower().endswith('.json'):
@@ -466,7 +568,7 @@ def open_personality_window():
     except Exception:
         last_selected = None
 
-    # We'll include a 'Custom' label for when slider values don't match any preset
+    # Include a 'Custom' label for when slider values don't match any listed preset
     preset_var = tk.StringVar(value=last_selected if (last_selected in presets) else 'Custom')
     # Update the shared summary label and the local window label
     def apply_changes():
@@ -498,7 +600,7 @@ def open_personality_window():
         apply_changes()
 
     tk.Label(win, text='Presets').pack(anchor='w', padx=8, pady=(4,0))
-    # OptionMenu options: show 'Custom' plus all preset names
+    # OptionMenu options - show 'Custom' plus all preset names
     option_names = ['Custom'] + list(presets.keys())
     preset_menu = tk.OptionMenu(win, preset_var, *option_names, command=apply_preset)
     preset_menu.pack(fill=tk.X, padx=8)
@@ -580,7 +682,7 @@ def open_personality_window():
                 return name
         return 'Custom'
 
-    # Called when a Scale is manipulated by the user. Update summary and preset selector.
+    # Called when a Scale is manipulated by the user, update summary and preset selector
     def on_slider_change(_=None):
         try:
             update_summary()
@@ -598,30 +700,49 @@ def open_personality_window():
                 preset_var.set('Custom')
             except Exception:
                 pass
+        # Update any mixer value labels if present
+        try:
+            for var_obj, lbl in value_label_pairs:
+                try:
+                    lbl.config(text=str(var_obj.get()))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-    tk.Label(win, text='Friendliness (0=reserved,1=slightly,2=friendly,3=very)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=3, orient=tk.HORIZONTAL, variable=friendliness_var, command=on_slider_change).pack(fill=tk.X, padx=8)
+    # Mixer-style layout, vertical sliders arranged horizontally to use widescreen space
+    mixer_frame = tk.Frame(win)
+    mixer_frame.pack(fill=tk.X, padx=8, pady=(6,4))
 
-    tk.Label(win, text='Professionalism (0=casual,1=somewhat,2=professional)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=professionalism_var, command=on_slider_change).pack(fill=tk.X, padx=8)
+    # Define fields as (label, variable, min, max)
+    # The last slider is 'Extroversion' conceptually (higher = more extroverted), but introversion was just kept for backwards compatibility
+    mixer_fields = [
+        ('Friendliness', friendliness_var, 0, 3),
+        ('Professionalism', professionalism_var, 0, 2),
+        ('Profanity', profanity_var, 0, 2),
+        ('Age', age_var, 5, 127),
+        ('Gender', gender_var, 0, 2),
+        ('Humour', humor_var, 0, 2),
+        ('Sarcasm', sarcasm_var, 0, 2),
+        ('Extroversion', introversion_var, 0, 2),
+    ]
 
-    tk.Label(win, text='Profanity (0=clean,1=moderate,2=high)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=profanity_var, command=on_slider_change).pack(fill=tk.X, padx=8)
+    # List of (tk.Variable, label widget) pairs for live updates
+    value_label_pairs = []
 
-    tk.Label(win, text='Age').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=5, to=127, orient=tk.HORIZONTAL, variable=age_var, command=on_slider_change).pack(fill=tk.X, padx=8)
-
-    tk.Label(win, text='Gender (0=masculine,1=neutral,2=feminine)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=gender_var, command=on_slider_change).pack(fill=tk.X, padx=8)
-
-    tk.Label(win, text='Humour (0=none,1=light,2=high)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=humor_var, command=on_slider_change).pack(fill=tk.X, padx=8)
-
-    tk.Label(win, text='Sarcasm (0=none,1=mild,2=strong)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=sarcasm_var, command=on_slider_change).pack(fill=tk.X, padx=8)
-
-    tk.Label(win, text='Introversion (0=extroverted,1=neutral,2=introverted)').pack(anchor='w', padx=8)
-    tk.Scale(win, from_=0, to=2, orient=tk.HORIZONTAL, variable=introversion_var, command=on_slider_change).pack(fill=tk.X, padx=8)
+    for col, (label_text, var_obj, vmin, vmax) in enumerate(mixer_fields):
+        col_frame = tk.Frame(mixer_frame)
+        col_frame.grid(row=0, column=col, padx=6, sticky='n')
+        # Use a slightly smaller font for labels so long words don't wrap to two lines
+        tk.Label(col_frame, text=label_text, font=(None, 9)).pack(pady=(0,4))
+        # For vertical orientation, show max at top, min at bottom
+        scale = tk.Scale(col_frame, from_=vmax, to=vmin, orient=tk.VERTICAL,
+                         variable=var_obj, command=on_slider_change, length=200)
+        scale.pack()
+        # Per-column numeric value label (keeps sliders visually aligned)
+        val_lbl = tk.Label(col_frame, text=str(var_obj.get()), font=(None, 9))
+        val_lbl.pack(pady=(4,0))
+        value_label_pairs.append((var_obj, val_lbl))
 
     # Summary shown in the window too (wraplength will be updated on resize)
     win_summary = tk.Label(win, text='', wraplength=280, justify='left')
@@ -652,7 +773,7 @@ def open_personality_window():
                 return name
         return 'Custom'
 
-    # If last_selected was saved and exists, keep it; otherwise try to match current sliders
+    # If last_selected was saved and exists, keep it, otherwise try to match current sliders
     if preset_var.get() not in presets:
         preset_var.set(find_matching_preset(current_values_tuple()))
 
@@ -694,14 +815,18 @@ def open_personality_window():
 
     win.protocol('WM_DELETE_WINDOW', on_close)
 
-    # Buttons were intentionally removed to allow immediate application of changes
-    # (apply_changes and apply_preset remain available programmatically)
-
 personality_menu = tk.Menu(menubar, tearoff=0)
 personality_menu.add_command(label='Configure...', command=open_personality_window)
 menubar.add_cascade(label='Personality', menu=personality_menu)
 
+# Trimmed history sent to the AI (kept short for context). full_history stores the complete
+# conversation (untrimmed) and is what we persist when saving conversations.
 history = []  # Chat history (10 pairs max)
+full_history = []  # Complete conversation log (untrimmed), saved to conversations/
+# Track the current conversation file path (None for a new/unsaved conversation)
+current_conversation_path = None
+# Track whether there are unsaved changes that the user might want to save on exit
+unsaved_changes = False
 
 # Conversation title label (shows filename or 'New Conversation')
 conv_title = tk.Label(root, text='New Conversation', font=(None, 12, 'bold'))
@@ -720,7 +845,7 @@ def append_chat(text: str):
     chat_area.see(tk.END)
     chat_area.config(state=tk.DISABLED)
 
-
+# Helper for displaying chat history in text box
 def render_history():
     chat_area.config(state=tk.NORMAL)
     chat_area.delete(1.0, tk.END)
@@ -732,14 +857,15 @@ def render_history():
             ts = ''
         else:
             continue
-        # Respect the show_timestamps_var toggle (hide timestamps when unchecked).
+        # Respect the show_timestamps_var toggle (hide timestamps when unchecked)
         try:
             show_ts = show_timestamps_var.get()
         except Exception:
             show_ts = True
         ts_text = f" [{ts}]" if (ts and show_ts) else ''
         chat_area.insert(tk.END, f"{role}{ts_text}: {msg}\n\n")
-        if role == "AI":
+        # If this is an assistant/preset reply (anything not 'You') add an extra spacer line
+        if role != 'You':
             chat_area.insert(tk.END, "\n")
     chat_area.see(tk.END)
     chat_area.config(state=tk.DISABLED)
@@ -768,12 +894,81 @@ humor_var = tk.IntVar(value=0)
 sarcasm_var = tk.IntVar(value=0)
 introversion_var = tk.IntVar(value=1)
 
+# On startup, attempt to apply the last selected preset stored in presets.json
+try:
+    presets_path = os.path.join(os.path.dirname(__file__), 'presets.json')
+    presets_dir = os.path.join(os.path.dirname(__file__), 'presets')
+    last_selected = None
+    if os.path.exists(presets_path):
+        try:
+            with open(presets_path, 'r', encoding='utf-8') as pf:
+                loaded = json.load(pf)
+            last_selected = loaded.get('last_selected') if isinstance(loaded, dict) else None
+        except Exception:
+            last_selected = None
+
+    # Only apply if last_selected is a built-in preset or a file in personalities/
+    if last_selected:
+        applied = False
+        if last_selected in DEFAULT_PRESETS:
+            vals = DEFAULT_PRESETS[last_selected]
+            friendliness_var.set(vals[0])
+            professionalism_var.set(vals[1])
+            profanity_var.set(vals[2])
+            age_var.set(vals[3])
+            gender_var.set(vals[4])
+            humor_var.set(vals[5])
+            sarcasm_var.set(vals[6])
+            introversion_var.set(vals[7])
+            applied = True
+        else:
+            # check personalities/ for a matching file
+            try:
+                fn = os.path.join(presets_dir, f"{last_selected}.json")
+                if os.path.exists(fn):
+                    with open(fn, 'r', encoding='utf-8') as pf:
+                        loaded = json.load(pf)
+                    vals = None
+                    if isinstance(loaded, list):
+                        vals = loaded
+                    elif isinstance(loaded, dict) and 'values' in loaded:
+                        vals = loaded.get('values')
+                    if vals and len(vals) >= 8:
+                        vals = [int(x) for x in vals[:8]]
+                        friendliness_var.set(vals[0])
+                        professionalism_var.set(vals[1])
+                        profanity_var.set(vals[2])
+                        age_var.set(vals[3])
+                        gender_var.set(vals[4])
+                        humor_var.set(vals[5])
+                        sarcasm_var.set(vals[6])
+                        introversion_var.set(vals[7])
+                        applied = True
+            except Exception:
+                applied = False
+    # If last_selected was 'Custom' or not found, revert to DEFAULT_PRESETS['Default AI']
+    if not last_selected or not applied:
+        vals = DEFAULT_PRESETS.get('Default AI')
+        friendliness_var.set(vals[0])
+        professionalism_var.set(vals[1])
+        profanity_var.set(vals[2])
+        age_var.set(vals[3])
+        gender_var.set(vals[4])
+        humor_var.set(vals[5])
+        sarcasm_var.set(vals[6])
+        introversion_var.set(vals[7])
+    # (title will be updated after the helper is defined)
+except Exception:
+    pass
+
 # Show timestamps toggle
-show_timestamps_var = tk.BooleanVar(value=True)
+show_timestamps_var = tk.BooleanVar(value=False)
 
 # Live summary label in main UI (updated by personality window)
-summary_label = tk.Label(root, text="Summary: friendly, somewhat professional, clean language, no humour, no sarcasm, neutral extroversion, age 30, neutral", wraplength=400, justify='left')
+summary_label = tk.Label(root, text="", wraplength=400, justify='left')
 summary_label.pack(padx=8, pady=(4,6))
+
+# (update_summary will be called after its definition so the label reflects startup presets)
 
 # Toggle to show/hide timestamps in the chat display
 show_ts_cb = tk.Checkbutton(root, text='Show timestamps', variable=show_timestamps_var, command=render_history)
@@ -831,23 +1026,133 @@ def update_summary(*args):
     else:
         tone.append('no sarcasm')
 
-    # Introversion (0-2)
+    # Extroversion (0-2) -- higher value means more extroverted
     if i == 2:
-        tone.append('introverted')
+        tone.append('extroverted')
     elif i == 1:
         tone.append('neutral extroversion')
     else:
-        tone.append('extroverted')
+        tone.append('introverted')
 
     age_desc = f'age {a}'
     gender_desc = 'feminine' if g==2 else ('masculine' if g==0 else 'gender neutral')
     summary_label.config(text='Summary: ' + ', '.join(tone) + f', {age_desc}, {gender_desc}')
+    # After updating summary, also refresh conversation title to show active preset
+    try:
+        # Determine active preset name and refresh title with it
+        preset_name = determine_active_preset_name()
+        # preserve current conversation filename if any
+        try:
+            cur = os.path.basename(current_conversation_path) if current_conversation_path else None
+        except Exception:
+            cur = None
+        set_conversation_title(cur)
+    except Exception:
+        pass
+
+# Now that update_summary is defined, refresh the summary_label to match startup-applied preset
+try:
+    update_summary()
+except Exception:
+    pass
 
 
-def set_conversation_title(name: str):
-    conv_title.config(text=name if name else 'New Conversation')
+def set_conversation_title(name: str, preset_override: str = None):
+    # If the name looks like a filename, strip the .json extension for display
+    # Use preset_override if provided, otherwise compute active preset
+    try:
+        if preset_override:
+            preset_label = preset_override
+        else:
+            preset_label = determine_active_preset_name()
+    except Exception:
+        preset_label = None
+
+    if name:
+        base = os.path.splitext(name)[0]
+        display = base if base else 'New Conversation'
+    else:
+        display = 'New Conversation'
+
+    if preset_label:
+        conv_title.config(text=f"{display} (with {preset_label})")
+    else:
+        conv_title.config(text=display)
+
+# Return the name of the matching preset for current slider values, or 'Custom'
+def determine_active_preset_name():    
+    # Build the current tuple
+    tpl = (
+        int(friendliness_var.get()), int(professionalism_var.get()), int(profanity_var.get()),
+        int(age_var.get()), int(gender_var.get()), int(humor_var.get()), int(sarcasm_var.get()), int(introversion_var.get())
+    )
+    # Check built-ins first
+    for name, vals in DEFAULT_PRESETS.items():
+        if tuple(vals) == tpl:
+            return name
+    # Check personalities dir for saved presets
+    try:
+        presets_dir = os.path.join(os.path.dirname(__file__), 'personalities')
+        for fname in os.listdir(presets_dir):
+            if not fname.lower().endswith('.json'):
+                continue
+            full = os.path.join(presets_dir, fname)
+            try:
+                with open(full, 'r', encoding='utf-8') as pf:
+                    loaded = json.load(pf)
+                vals = None
+                if isinstance(loaded, list):
+                    vals = loaded
+                elif isinstance(loaded, dict) and 'values' in loaded:
+                    vals = loaded.get('values')
+                if vals and len(vals) >= 8 and tuple(int(x) for x in vals[:8]) == tpl:
+                    return os.path.splitext(fname)[0]
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return 'Custom'
 
 # Load history on start
 load_history()
+
+# On startup, show the last-selected preset in the conversation title (if available)
+try:
+    presets_path = os.path.join(os.path.dirname(__file__), 'presets.json')
+    if os.path.exists(presets_path):
+        try:
+            with open(presets_path, 'r', encoding='utf-8') as pf:
+                loaded = json.load(pf)
+            last_sel = loaded.get('last_selected') if isinstance(loaded, dict) else None
+        except Exception:
+            last_sel = None
+    else:
+        last_sel = None
+    if last_sel:
+        try:
+            set_conversation_title(None, last_sel)
+        except Exception:
+            pass
+except Exception:
+    pass
+
+# After a short delay, ask the user if they'd like to load a conversation from disk
+def prompt_load_on_startup():
+    try:
+        conv_dir = os.path.join(os.path.dirname(__file__), 'conversations')
+        os.makedirs(conv_dir, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        if messagebox.askyesno('Load conversation', 'Load an existing conversation from disk?'):
+            load_conversation_file()
+    except Exception:
+        pass
+
+# Schedule prompt shortly after mainloop starts so dialogs are shown properly
+try:
+    root.after(200, prompt_load_on_startup)
+except Exception:
+    pass
 
 root.mainloop()

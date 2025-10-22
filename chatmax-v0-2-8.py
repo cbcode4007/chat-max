@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-7.py
+# File:        chatmax-v0-2-8.py
 # Author:      Colin Bond
-# Version:     0.2.7 (2025-10-22, adjusted new sliders' positions, cleaned up chat area, fixed windows opening behind others)
+# Version:     0.2.8 (2025-10-22, addressed bug related to saved custom preset's summary not updating properly on restart)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -53,7 +53,7 @@ def send_message():
     # Start with a neutral, blank-slate system instruction, all tone/style should be provided
     # by subsequent system messages (e.g., personality_instruction and preferences).
     messages_for_gpt = [{"role": "system", "content": (
-        "You are a user's chat partner. As such, you should keep responses concise, try to adapt them based on the context of the conversation, and for the most part the user's preferences or tone depending on your personality defined below."
+        f"Your name is {preset_label} and you are a user's chat partner. As such, you should keep responses concise, try to adapt them based on the context of the conversation, and for the most part the user's preferences or tone depending on your personality defined below."
     )}]
 
     # Personality instructions built from sliders (appended as another system message)
@@ -90,7 +90,7 @@ def send_message():
         # Profanity (0-2), but enforce age constraint, young voices should not use profanity
         if a <= 15:
             # force no profanity for young ages regardless of setting
-            parts.append('Do not use profanity; avoid coarse language due to youthful voice.')
+            parts.append('Do not use profanity under any circumstances; avoid coarse language due to youthful voice.')
         else:
             if r == 2:
                 parts.append('Profanity allowed: high (use strong coarse language as much as possible if it makes sense).')
@@ -976,7 +976,8 @@ introversion_var = tk.IntVar(value=1)
 # On startup, attempt to apply the last selected preset stored in presets.json
 try:
     presets_path = os.path.join(os.path.dirname(__file__), 'presets.json')
-    presets_dir = os.path.join(os.path.dirname(__file__), 'presets')
+    # personalities/ is where per-file presets are stored (not 'presets/')
+    presets_dir = os.path.join(os.path.dirname(__file__), 'personalities')
     last_selected = None
     if os.path.exists(presets_path):
         try:
@@ -1025,18 +1026,20 @@ try:
                         applied = True
             except Exception:
                 applied = False
-    # If last_selected was 'Custom' or not found, revert to DEFAULT_PRESETS['Default AI']
-    if not last_selected or not applied:
-        vals = DEFAULT_PRESETS.get('Default AI')
-        friendliness_var.set(vals[0])
-        professionalism_var.set(vals[1])
-        profanity_var.set(vals[2])
-        age_var.set(vals[3])
-        gender_var.set(vals[4])
-        humor_var.set(vals[5])
-        sarcasm_var.set(vals[6])
-        introversion_var.set(vals[7])
-    # (title will be updated after the helper is defined)
+            # If last_selected was 'Custom' or not found, revert to DEFAULT_PRESETS['Default AI']
+            if not last_selected or not applied:
+                vals = DEFAULT_PRESETS.get('Default AI')
+                friendliness_var.set(vals[0])
+                professionalism_var.set(vals[1])
+                profanity_var.set(vals[2])
+                age_var.set(vals[3])
+                gender_var.set(vals[4])
+                humor_var.set(vals[5])
+                sarcasm_var.set(vals[6])
+                introversion_var.set(vals[7])
+            # If a saved preset was applied, the UI will be refreshed later after
+            # summary/title helper functions are defined. Avoid calling them here
+            # to prevent editor/static-analysis 'not defined' warnings.
 except Exception:
     pass
 

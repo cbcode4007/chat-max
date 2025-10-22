@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-6.py
+# File:        chatmax-v0-2-7.py
 # Author:      Colin Bond
-# Version:     0.2.6 (2025*-10-21, added interface improvements and changes to make things clearer/more convenient like confirm dialogs)
+# Version:     0.2.7 (2025-10-22, adjusted new sliders' positions, cleaned up chat area, fixed windows opening behind others)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -23,11 +23,11 @@ endpoint = 'http://192.168.123.128:5001/chat'
 DEFAULT_PRESETS = {
     'Default AI': (2, 1, 0, 30, 1, 0, 0, 1),
     'Helpful Professional': (2, 2, 0, 35, 1, 0, 0, 1),
-    'Casual Friendly': (3, 0, 0, 25, 1, 1, 0, 0),
+    'Casual Friendly': (3, 0, 0, 25, 1, 1, 0, 1),
     'Playful Sarcastic': (2, 0, 1, 18, 1, 2, 2, 1),
-    'Child-Friendly': (3, 1, 0, 12, 1, 0, 0, 1),
-    'Stoic Professional': (1, 2, 0, 40, 1, 0, 0, 2),
-    'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 2),
+    'Child-Friendly': (3, 1, 0, 12, 1, 0, 0, 2),
+    'Stoic Professional': (1, 2, 0, 40, 1, 0, 0, 0),
+    'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 0),
 }
 
 def send_message():
@@ -53,7 +53,7 @@ def send_message():
     # Start with a neutral, blank-slate system instruction, all tone/style should be provided
     # by subsequent system messages (e.g., personality_instruction and preferences).
     messages_for_gpt = [{"role": "system", "content": (
-        "You are a user's chat partner. Do not assume or apply any particular personality or tone, besides keeping concise. Follow any additional system instructions that are listed below to determine tone, style, and behavior."
+        "You are a user's chat partner. As such, you should keep responses concise, try to adapt them based on the context of the conversation, and for the most part the user's preferences or tone depending on your personality defined below."
     )}]
 
     # Personality instructions built from sliders (appended as another system message)
@@ -77,7 +77,7 @@ def send_message():
         elif f == 1:
             parts.append('Be slightly reserved.')
         else:
-            parts.append('Be very reserved and concise.')
+            parts.append('Be very reserved and blunt.')
 
         # Professionalism (0-2)
         if p == 2:
@@ -93,9 +93,9 @@ def send_message():
             parts.append('Do not use profanity; avoid coarse language due to youthful voice.')
         else:
             if r == 2:
-                parts.append('Profanity allowed: high (may use strong coarse language).')
+                parts.append('Profanity allowed: high (use strong coarse language as much as possible if it makes sense).')
             elif r == 1:
-                parts.append('Profanity allowed: moderate (occasional mild swear words).')
+                parts.append('Profanity allowed: moderate (may use mild swear words).')
             else:
                 parts.append('No profanity; use clean language.')
 
@@ -165,14 +165,21 @@ def send_message():
 
     # Add user message to chat UI immediately (include timestamp if enabled) and insert AI placeholder
     try:
-        if show_timestamps_var.get():
-            append_chat(f"You [{ts}]: {message}\n\n")
-        else:
-            append_chat(f"You: {message}\n\n")
+        # Insert the user's message immediately with colored label
+        insert_labeled_message('You', message, ts)
     except Exception:
-        # Fallback for older runtime states where the timestamp toggle may not exist
-        append_chat(f"You [{ts}]: {message}\n\n")
-    append_chat(f"{preset_label} is thinking...\n\n")
+        try:
+            if show_timestamps_var.get():
+                append_chat(f"You [{ts}]: {message}\n\n")
+            else:
+                append_chat(f"You: {message}\n\n")
+        except Exception:
+            append_chat(f"You [{ts}]: {message}\n\n")
+    try:
+        # Insert assistant placeholder with colored preset label (no colon)
+        insert_labeled_message(preset_label, 'is thinking...', prefix_colon=False)
+    except Exception:
+        append_chat(f"{preset_label} is thinking...\n\n")
     entry.delete(0, tk.END)
     chat_area.see(tk.END)
 
@@ -449,10 +456,10 @@ def clear_prefs():
             messagebox.showinfo('Preferences', 'No preferences file to delete')
             return
         # Ask for confirmation before deleting the preferences file
-        if not messagebox.askyesno('Confirm', 'Are you sure you want to delete preferences.txt? This cannot be undone.'):
+        if not messagebox.askyesno('Confirm', 'This app automatically detects and writes your preferences to a file for future reference by the chat partner. Are you sure you want to delete this information? This cannot be undone.'):
             return
         os.remove(PREFS_PATH)
-        messagebox.showinfo('Preferences cleared', 'preferences.txt deleted')
+        messagebox.showinfo('Preferences', 'Preferences cleared.')
     except Exception as e:
         messagebox.showerror('Error', str(e))
 
@@ -464,9 +471,9 @@ root.geometry("800x600")
 # Menu bar
 menubar = tk.Menu(root)
 file_menu = tk.Menu(menubar, tearoff=0)
-file_menu.add_command(label='New', command=new_conversation)
-file_menu.add_command(label='Save', command=save_conversation)
-file_menu.add_command(label='Load', command=load_conversation_file)
+file_menu.add_command(label='New...', command=new_conversation)
+file_menu.add_command(label='Save...', command=save_conversation)
+file_menu.add_command(label='Load...', command=load_conversation_file)
 file_menu.add_separator()
 def on_exit():
     # If there are unsaved changes, prompt the user to save
@@ -505,10 +512,30 @@ root.protocol('WM_DELETE_WINDOW', on_exit)
 def open_personality_window():
     # Reuse global vars and build a Toplevel window with sliders
     if getattr(open_personality_window, 'win', None) and open_personality_window.win.winfo_exists():
-        open_personality_window.win.lift()
+        try:
+            # If it's minimized or hidden, restore it
+            open_personality_window.win.deiconify()
+        except Exception:
+            pass
+        try:
+            open_personality_window.win.lift()
+            open_personality_window.win.focus_force()
+            # Temporary topmost toggle helps on some window managers to raise the window
+            try:
+                open_personality_window.win.attributes('-topmost', True)
+                open_personality_window.win.after(50, lambda w=open_personality_window.win: w.attributes('-topmost', False))
+            except Exception:
+                pass
+        except Exception:
+            pass
         return
     win = tk.Toplevel(root)
     win.title('Personality')
+    # Make this Toplevel transient to the main window so the window manager treats it as a child
+    try:
+        win.transient(root)
+    except Exception:
+        pass
     # Do not hardcode geometry so the window can adapt to scaling, but with a reasonable minimum
     win.minsize(320, 300)
     open_personality_window.win = win
@@ -519,11 +546,11 @@ def open_personality_window():
     presets = {
         'Default AI': (2, 1, 0, 30, 1, 0, 0, 1),
         'Helpful Professional': (2, 2, 0, 35, 1, 0, 0, 1),
-        'Casual Friendly': (3, 0, 0, 25, 1, 1, 0, 0),
+        'Casual Friendly': (3, 0, 0, 25, 1, 1, 0, 1),
         'Playful Sarcastic': (2, 0, 1, 18, 1, 2, 2, 1),
-        'Child-Friendly': (3, 1, 0, 12, 1, 0, 0, 1),
-        'Stoic Professional': (1, 2, 0, 40, 1, 0, 0, 2),
-        'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 2),
+        'Child-Friendly': (3, 1, 0, 12, 1, 0, 0, 2),
+        'Stoic Professional': (1, 2, 0, 40, 1, 0, 0, 0),
+        'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 0),
     }
 
     # Presets file/dir paths
@@ -616,7 +643,13 @@ def open_personality_window():
     def save_preset_to_file():
         # Ask for a filename to save the current slider configuration
         tpl = current_values_tuple()
-        name = tk.simpledialog.askstring('Save preset', 'Preset name (file will be saved as <name>.json):')
+        # Ask parented simpledialog so it appears above the main window
+        try:
+            import tkinter.simpledialog as simpledialog
+            name = simpledialog.askstring('Save preset', 'Preset name (file will be saved as <name>.json):', parent=win)
+        except Exception:
+            # fallback if simpledialog import or parent arg fails
+            name = tk.simpledialog.askstring('Save preset', 'Preset name (file will be saved as <name>.json):')
         if not name:
             return
         fname = name.strip()
@@ -643,7 +676,11 @@ def open_personality_window():
             messagebox.showerror('Save error', str(e))
 
     def load_preset_from_file():
-        path = filedialog.askopenfilename(initialdir=presets_dir, filetypes=[('JSON files','*.json'), ('All files','*.*')])
+        # Parent the file dialog so the OS places it above the personality window
+        try:
+            path = filedialog.askopenfilename(initialdir=presets_dir, filetypes=[('JSON files','*.json'), ('All files','*.*')], parent=win)
+        except Exception:
+            path = filedialog.askopenfilename(initialdir=presets_dir, filetypes=[('JSON files','*.json'), ('All files','*.*')])
         if not path:
             return
         try:
@@ -730,22 +767,34 @@ def open_personality_window():
     # List of (tk.Variable, label widget) pairs for live updates
     value_label_pairs = []
 
-    for col, (label_text, var_obj, vmin, vmax) in enumerate(mixer_fields):
-        col_frame = tk.Frame(mixer_frame)
-        col_frame.grid(row=0, column=col, padx=6, sticky='n')
-        # Use a slightly smaller font for labels so long words don't wrap to two lines
-        tk.Label(col_frame, text=label_text, font=(None, 9)).pack(pady=(0,4))
-        # For vertical orientation, show max at top, min at bottom
+    # Reflow mixer into two rows x four columns to make the window narrower
+    scale_length = 120
+    cols = 4
+    rows = (len(mixer_fields) + cols - 1) // cols
+    # Configure column sizes
+    for c in range(cols):
+        try:
+            mixer_frame.columnconfigure(c, weight=1, minsize=scale_length + 12)
+        except Exception:
+            pass
+
+    for idx, (label_text, var_obj, vmin, vmax) in enumerate(mixer_fields):
+        row = idx // cols
+        col = idx % cols
+        col_frame = tk.Frame(mixer_frame, width=scale_length)
+        col_frame.grid(row=row, column=col, padx=6, pady=4, sticky='n')
+        lbl = tk.Label(col_frame, text=label_text, font=(None, 9), wraplength=scale_length, justify='center')
+        lbl.grid(row=0, column=0, pady=(0,6))
         scale = tk.Scale(col_frame, from_=vmax, to=vmin, orient=tk.VERTICAL,
-                         variable=var_obj, command=on_slider_change, length=200)
-        scale.pack()
-        # Per-column numeric value label (keeps sliders visually aligned)
+                         variable=var_obj, command=on_slider_change, length=scale_length)
+        scale.grid(row=1, column=0)
         val_lbl = tk.Label(col_frame, text=str(var_obj.get()), font=(None, 9))
-        val_lbl.pack(pady=(4,0))
+        val_lbl.grid(row=2, column=0, pady=(6,0))
         value_label_pairs.append((var_obj, val_lbl))
 
     # Summary shown in the window too (wraplength will be updated on resize)
-    win_summary = tk.Label(win, text='', wraplength=280, justify='left')
+    # Slightly smaller and greyed to be less prominent
+    win_summary = tk.Label(win, text='', wraplength=280, justify='left', font=(None, 9, 'italic'), fg='gray40')
     win_summary.pack(padx=8, pady=10, fill=tk.X)
 
     # Update the shared summary label and the local window label
@@ -819,6 +868,11 @@ personality_menu = tk.Menu(menubar, tearoff=0)
 personality_menu.add_command(label='Configure...', command=open_personality_window)
 menubar.add_cascade(label='Personality', menu=personality_menu)
 
+# Settings menu
+settings_menu = tk.Menu(menubar, tearoff=0)
+settings_menu.add_command(label='Clear Preferences...', command=clear_prefs)
+menubar.add_cascade(label='Settings', menu=settings_menu)
+
 # Trimmed history sent to the AI (kept short for context). full_history stores the complete
 # conversation (untrimmed) and is what we persist when saving conversations.
 history = []  # Chat history (10 pairs max)
@@ -836,6 +890,9 @@ conv_title.pack(pady=(8,0))
 chat_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=70, height=20)
 chat_area.pack(padx=10, pady=6, fill=tk.BOTH, expand=True)
 chat_area.config(state=tk.DISABLED)
+# Configure tags for colored labels
+chat_area.tag_configure('user_label', foreground='#003366', font=(None, 10, 'bold'))
+chat_area.tag_configure('assistant_label', foreground='#b30000', font=(None, 10, 'bold'))
 
 
 # Helpers to update the read-only chat area from code
@@ -845,11 +902,32 @@ def append_chat(text: str):
     chat_area.see(tk.END)
     chat_area.config(state=tk.DISABLED)
 
+
+# Insert a single labeled message into the chat_area without modifying history, role text is coloured using tags 
+# while the rest of the message remains normal (colon omitted for when the AI is still replying)
+def insert_labeled_message(role: str, message: str, ts: str = '', prefix_colon: bool = True):
+    chat_area.config(state=tk.NORMAL)
+    # choose tag for role
+    tag = 'user_label' if role == 'You' else 'assistant_label'
+    # insert role with tag
+    chat_area.insert(tk.END, role, tag)
+    # insert timestamp and rest; optionally include colon separator
+    ts_text = f" [{ts}]" if (ts and show_timestamps_var.get()) else ''
+    sep = ': ' if prefix_colon else ' '
+    chat_area.insert(tk.END, f"{ts_text}{sep}{message}\n\n")
+    # extra spacer for assistant replies
+    if role != 'You':
+        chat_area.insert(tk.END, "\n")
+    chat_area.see(tk.END)
+    chat_area.config(state=tk.DISABLED)
+
 # Helper for displaying chat history in text box
 def render_history():
     chat_area.config(state=tk.NORMAL)
     chat_area.delete(1.0, tk.END)
-    for entry_item in history:
+    # Show the full, untrimmed conversation to the user (full_history)
+    # `history` remains the trimmed list used for model context.
+    for entry_item in full_history:
         if len(entry_item) >= 3:
             role, msg, ts = entry_item[0], entry_item[1], entry_item[2]
         elif len(entry_item) == 2:
@@ -862,11 +940,13 @@ def render_history():
             show_ts = show_timestamps_var.get()
         except Exception:
             show_ts = True
-        ts_text = f" [{ts}]" if (ts and show_ts) else ''
-        chat_area.insert(tk.END, f"{role}{ts_text}: {msg}\n\n")
-        # If this is an assistant/preset reply (anything not 'You') add an extra spacer line
-        if role != 'You':
-            chat_area.insert(tk.END, "\n")
+        # Use the labeled insertion helper so role labels are colored
+        try:
+            insert_labeled_message(role, msg, ts)
+        except Exception:
+            # fallback to plain insertion
+            ts_text = f" [{ts}]" if (ts and show_ts) else ''
+            chat_area.insert(tk.END, f"{role}{ts_text}: {msg}\n\n")
     chat_area.see(tk.END)
     chat_area.config(state=tk.DISABLED)
 
@@ -877,8 +957,7 @@ entry = tk.Entry(entry_frame, font=("Arial", 12))
 entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,5))
 entry.bind("<Return>", lambda e: send_message())
 
-clear_prefs_btn = tk.Button(entry_frame, text="Clear Prefs", command=lambda: clear_prefs(), font=("Arial", 10))
-clear_prefs_btn.pack(side=tk.RIGHT, padx=(0,6))
+    # Clear Prefs was moved to the Settings menu
 
 send_btn = tk.Button(entry_frame, text="Send", command=send_message, 
                      font=("Arial", 12), bg="lightblue")
@@ -965,7 +1044,8 @@ except Exception:
 show_timestamps_var = tk.BooleanVar(value=False)
 
 # Live summary label in main UI (updated by personality window)
-summary_label = tk.Label(root, text="", wraplength=400, justify='left')
+# Make it small, italic and grey so it's less visually aggressive
+summary_label = tk.Label(root, text="", wraplength=400, justify='left', font=(None, 9, 'italic'), fg='gray40')
 summary_label.pack(padx=8, pady=(4,6))
 
 # (update_summary will be called after its definition so the label reflects startup presets)

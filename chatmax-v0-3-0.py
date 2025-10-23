@@ -1,9 +1,9 @@
-# File:        chatmax-v0-2-9.py
-# Author:      Colin Bond
-# Version:     0.2.9 (2025-10-23, fixed not being able to save presets anymore)
+# File:        chatmax-v0-3-0.py
+# Author:      Colin Fajardo
+# Version:     0.3.0 (2025-10-23, implemented settings for local API key or server endpoint usage)
 #
 # Description: A simple chat interface for configuring and interacting with 
-#              personalized, learning GPT models from an endpoint.
+#              personalized, learning GPT models.
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -17,7 +17,12 @@ import os
 PREFS_PATH = os.path.join(os.path.dirname(__file__), 'preferences.txt')
 PREFS_MAX_CHARS = 2000
 
-endpoint = 'http://192.168.123.128:5001/chat'
+# OpenAI API key storage (prompt at startup if not present)
+OPENAI_API_KEY = None
+SETTINGS_PATH = os.path.join(os.path.dirname(__file__), 'settings.json')
+
+# endpoint = 'http://192.168.123.128:5001/chat'
+endpoint = ''
 
 # Built-in presets (shared so they can be referenced at startup)
 DEFAULT_PRESETS = {
@@ -236,10 +241,12 @@ def send_message():
 
                 # Try to get extracted preferences from the server
                 try:
-                    gen_resp = requests.post(endpoint, json={'messages': gen_msgs}, timeout=20)
-                    gen_resp.raise_for_status()
-                    gen_data = gen_resp.json()
-                    extracted = gen_data.get('response', '').strip() if isinstance(gen_data, dict) else ''
+                    # Route preference-extraction through local or server API depending on settings
+                    if 'use_local_var' in globals() and use_local_var.get():                        
+                        gen_text = call_local_openai(gen_msgs)
+                    else:                        
+                        gen_text = call_server_api(gen_msgs)
+                    extracted = gen_text.strip() if isinstance(gen_text, str) else ''
                 except Exception as e:
                     extracted = ''
 
@@ -298,11 +305,18 @@ def send_message():
             except Exception:
                 pass
 
-            # Send user message to AI endpoint with personalized (pref and memory) payload
-            response = requests.post(endpoint, json={'messages': payload}, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            ai_reply = data.get('response', '')
+            # Send user message either to the local OpenAI API (gpt-4o-mini) or to the configured server endpoint
+            ai_reply = ''
+            try:
+                if 'use_local_var' in globals() and use_local_var.get():
+                    # Local call using the stored API key                    
+                    ai_reply = call_local_openai(payload)
+                else:
+                    # Centralized server call                    
+                    ai_reply = call_server_api(payload)
+            except Exception:
+                # Re-raise to be handled by outer exception handler
+                raise
 
             # Update history (append assistant reply using the active preset label)
             ts = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -348,6 +362,357 @@ def send_message():
     # Start background thread for the request
     thread = threading.Thread(target=worker, args=(messages_for_gpt,), daemon=True)
     thread.start()
+
+
+def get_saved_api_key():
+    """Return an API key stored in settings.json or None."""
+    try:
+        loaded = load_settings()
+        if isinstance(loaded, dict):
+            key = loaded.get('openai_api_key')
+            if key:
+                return key
+    except Exception:
+        pass
+    return None
+
+
+def _atomic_write(path: str, text: str, mode: int = 0o600):
+    """Write text atomically to path and set permissions.
+    Uses a tmp file + os.replace and attempts fsync; best-effort chmod.
+    """
+    try:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as tf:
+            tf.write(text)
+            tf.flush()
+            try:
+                os.fsync(tf.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, mode)
+        except Exception:
+            pass
+    except Exception:
+        # Best-effort only; don't raise to avoid breaking startup
+        pass
+
+
+def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | None = None, last_deleted: str | None = None):
+    """Persist settings to SETTINGS_PATH.
+
+    Arguments:
+    - use_local: whether to enable local OpenAI usage
+    - api_key: if provided:
+        - a non-empty string will store the API key in settings.json
+        - an empty string ('') will remove any stored key from settings.json
+        - None will leave existing openai_api_key in settings.json untouched
+    """
+    try:
+        # Load existing settings to preserve unrelated fields
+        data = {}
+        try:
+            if os.path.exists(SETTINGS_PATH):
+                with open(SETTINGS_PATH, 'r', encoding='utf-8') as sf:
+                    data = json.load(sf) or {}
+        except Exception:
+            data = {}
+        data['use_local_ai'] = bool(use_local)
+        if api_key is not None:
+            if api_key:
+                data['openai_api_key'] = api_key
+            else:
+                # remove stored key
+                data.pop('openai_api_key', None)
+        if endpoint is not None:
+            if endpoint:
+                data['server_endpoint'] = endpoint
+            else:
+                data.pop('server_endpoint', None)
+        # Record which credential was deleted most recently (if provided).
+        # Use a stable key name so startup logic can prefer prompting the
+        # most recently removed credential when both are missing.
+        if last_deleted is not None:
+            if last_deleted:
+                data['last_credential_deleted'] = str(last_deleted)
+                try:
+                    data['last_credential_deleted_ts'] = int(time.time())
+                except Exception:
+                    pass
+            else:
+                data.pop('last_credential_deleted', None)
+                data.pop('last_credential_deleted_ts', None)
+        _atomic_write(SETTINGS_PATH, json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+def load_settings():
+    """Return stored settings dict or defaults.
+
+    Also returns any metadata about the last deleted credential so startup
+    logic can prefer prompting for the most recently removed credential.
+    """
+    try:
+        if os.path.exists(SETTINGS_PATH):
+            with open(SETTINGS_PATH, 'r', encoding='utf-8') as sf:
+                loaded = json.load(sf)
+            return {
+                'use_local_ai': bool(loaded.get('use_local_ai', False)),
+                'openai_api_key': loaded.get('openai_api_key'),
+                'server_endpoint': loaded.get('server_endpoint'),
+                'last_credential_deleted': loaded.get('last_credential_deleted'),
+                'last_credential_deleted_ts': loaded.get('last_credential_deleted_ts')
+            }
+    except Exception:
+        pass
+    return {'use_local_ai': False, 'openai_api_key': None, 'server_endpoint': None, 'last_credential_deleted': None}
+
+
+def call_local_openai(messages_for_gpt):
+    """Call OpenAI's chat completions API (gpt-4o-mini) using the stored API key.
+    Returns the assistant reply string.
+    """
+    if not OPENAI_API_KEY:
+        raise RuntimeError('No OpenAI API key available for local calls')
+    try:
+        url = 'https://api.openai.com/v1/chat/completions'
+        headers = {'Authorization': f'Bearer {OPENAI_API_KEY}', 'Content-Type': 'application/json'}
+        payload = {'model': 'gpt-4o-mini', 'messages': messages_for_gpt}
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        # Try to extract assistant content in common OpenAI response shapes
+        content = ''
+        if isinstance(data, dict):
+            # completion-style
+            choices = data.get('choices') or []
+            if choices and isinstance(choices, list):
+                first = choices[0]
+                # newer responses have 'message' dict
+                msg = first.get('message') if isinstance(first, dict) else None
+                if isinstance(msg, dict):
+                    content = msg.get('content', '')
+                else:
+                    # older shape: 'text'
+                    content = first.get('text', '')
+        return content or ''
+    except Exception as e:
+        raise
+
+
+def call_server_api(messages_for_gpt):
+    """Send messages to the configured server endpoint and return the assistant reply string.
+    This centralizes the inlined requests.post call so both pathways live next to each other.
+    """
+    try:
+        # Prefer any user-configured endpoint stored in settings.json
+        ep = get_saved_endpoint() or endpoint
+        resp = requests.post(ep, json={'messages': messages_for_gpt}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get('response', '') if isinstance(data, dict) else ''
+    except Exception:
+        raise
+
+
+# Removed unused fallback input Toplevel helper to reduce code size.
+
+
+def prompt_for_api_key():
+    """Ensure an OpenAI API key is available: if missing, show a centered modal
+    dialog that cannot be closed until the user supplies (and saves) a key.
+    """
+    global OPENAI_API_KEY
+    try:
+        key = get_saved_api_key()
+        if key:
+            OPENAI_API_KEY = key
+            return
+
+        # No saved key: force a centered, modal, non-closable dialog
+        dlg = tk.Toplevel(root)
+        dlg.title('OpenAI API Key Required')
+        try:
+            dlg.transient(root)
+        except Exception:
+            pass
+        dlg.resizable(False, False)
+
+        # Disable window close and Escape key so the dialog cannot be dismissed
+        dlg.protocol('WM_DELETE_WINDOW', lambda: None)
+        dlg.bind('<Escape>', lambda e: None)
+
+        tk.Label(dlg, text='An OpenAI API key is required to run locally. Please enter it to continue.', wraplength=420, justify='left').pack(padx=16, pady=(12,6))
+        key_var = tk.StringVar()
+        entry = tk.Entry(dlg, textvariable=key_var, show='*', width=56)
+        entry.pack(padx=16, pady=(0,8))
+
+        info_lbl = tk.Label(dlg, text='The key will be saved locally to allow offline use of OpenAI. It will not be displayed again.', wraplength=420, justify='left', fg='gray40')
+        info_lbl.pack(padx=16, pady=(0,8))
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=(6,14))
+
+        save_btn = tk.Button(btn_frame, text='Save and continue', state=tk.DISABLED)
+        save_btn.pack(side=tk.LEFT, padx=6)
+
+        def on_change(*_):
+            val = key_var.get().strip()
+            try:
+                save_btn.config(state=tk.NORMAL if val else tk.DISABLED)
+            except Exception:
+                pass
+
+        def on_save():
+            val = key_var.get().strip()
+            if not val:
+                return
+            # Persist key into settings.json
+            try:
+                save_settings(True, api_key=val)
+            except Exception:
+                pass
+            try:
+                # set global so other code can read it immediately
+                nonlocal_dummy = None
+            except Exception:
+                pass
+            OPENAI_API_KEY = val
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        save_btn.config(command=on_save)
+        key_var.trace_add('write', on_change)
+
+        # Center the dialog on screen after geometry settles
+        dlg.update_idletasks()
+        ww = dlg.winfo_width()
+        wh = dlg.winfo_height()
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        x = max(0, (sw - ww) // 2)
+        y = max(0, (sh - wh) // 2)
+        try:
+            dlg.geometry(f'+{x}+{y}')
+        except Exception:
+            pass
+
+        # Make modal and block until a key is saved
+        try:
+            dlg.grab_set()
+            entry.focus_force()
+            root.wait_window(dlg)
+        except Exception:
+            try:
+                root.wait_window(dlg)
+            except Exception:
+                pass
+    except Exception:
+        OPENAI_API_KEY = get_saved_api_key()
+
+
+def get_saved_endpoint():
+    """Return the saved server endpoint from settings.json or None."""
+    try:
+        loaded = load_settings()
+        if isinstance(loaded, dict):
+            ep = loaded.get('server_endpoint')
+            if ep:
+                return ep
+    except Exception:
+        pass
+    return None
+
+
+def prompt_for_endpoint():
+    """Prompt the user for a server endpoint when server mode is entered and none is configured."""
+    global endpoint
+    try:
+        ep = get_saved_endpoint()
+        if ep:
+            endpoint = ep
+            return
+
+        dlg = tk.Toplevel(root)
+        dlg.title('Server Endpoint Required')
+        try:
+            dlg.transient(root)
+        except Exception:
+            pass
+        dlg.resizable(False, False)
+        dlg.protocol('WM_DELETE_WINDOW', lambda: None)
+        dlg.bind('<Escape>', lambda e: None)
+
+        tk.Label(dlg, text='A server endpoint is required for server mode. Enter the full URL (e.g. http://host:port/chat):', wraplength=420, justify='left').pack(padx=16, pady=(12,6))
+        ep_var = tk.StringVar()
+        entry = tk.Entry(dlg, textvariable=ep_var, width=60)
+        entry.pack(padx=16, pady=(0,8))
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=(6,14))
+        save_btn = tk.Button(btn_frame, text='Save and continue', state=tk.DISABLED)
+        save_btn.pack(side=tk.LEFT, padx=6)
+
+        def on_change(*_):
+            val = ep_var.get().strip()
+            try:
+                save_btn.config(state=tk.NORMAL if val else tk.DISABLED)
+            except Exception:
+                pass
+
+        def on_save():
+            val = ep_var.get().strip()
+            if not val:
+                return
+            try:
+                # Persist endpoint into settings.json
+                save_settings(False, endpoint=val)
+            except Exception:
+                pass
+            try:
+                endpoint = val
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        save_btn.config(command=on_save)
+        ep_var.trace_add('write', on_change)
+
+        dlg.update_idletasks()
+        ww = dlg.winfo_width()
+        wh = dlg.winfo_height()
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        x = max(0, (sw - ww) // 2)
+        y = max(0, (sh - wh) // 2)
+        try:
+            dlg.geometry(f'+{x}+{y}')
+        except Exception:
+            pass
+
+        try:
+            dlg.grab_set()
+            entry.focus_force()
+            root.wait_window(dlg)
+        except Exception:
+            try:
+                root.wait_window(dlg)
+            except Exception:
+                pass
+    except Exception:
+        # fallback: leave global endpoint as-is
+        try:
+            endpoint = endpoint
+        except Exception:
+            pass
 
 def load_history():
     # Use the central render function which handles enabling/disabling the widget
@@ -456,7 +821,13 @@ def clear_prefs():
             messagebox.showinfo('Preferences', 'No preferences file to delete')
             return
         # Ask for confirmation before deleting the preferences file
-        if not messagebox.askyesno('Confirm', 'This app automatically detects and writes your preferences to a file for future reference by the chat partner. Are you sure you want to delete this information? This cannot be undone.'):
+        try:
+            preset_label = determine_active_preset_name()
+        except Exception:
+            preset_label = 'saved preferences'
+
+        confirm_msg = f"This app automatically detects and writes your preferences to a file for future reference by {preset_label}. Are you sure you want to delete this file? This will remove all of your saved preferences and cannot be undone."
+        if not messagebox.askyesno('Confirm', confirm_msg):
             return
         os.remove(PREFS_PATH)
         messagebox.showinfo('Preferences', 'Preferences cleared.')
@@ -864,11 +1235,245 @@ menubar.add_cascade(label='Personality', menu=personality_menu)
 
 # Settings menu
 settings_menu = tk.Menu(menubar, tearoff=0)
+# Ensure use_local_var exists (loaded earlier near UI setup; if not, provide default)
+if 'use_local_var' not in globals():
+    try:
+        _loaded_settings = load_settings()
+        use_local_var = tk.BooleanVar(value=bool(_loaded_settings.get('use_local_ai', True)))
+    except Exception:
+        use_local_var = tk.BooleanVar(value=True)
+
+def manage_api_key():
+    # Open a dialog to view/update/delete the stored OpenAI API key
+    try:
+        # Determine current saved key (from settings.json)
+        file_key = None
+        try:
+            loaded = load_settings()
+            file_key = loaded.get('openai_api_key') if isinstance(loaded, dict) else None
+        except Exception:
+            file_key = None
+
+        def save_new(k):
+            # If k is falsy, treat as a deletion request
+            if k is None or not k.strip():
+                # Remove any key embedded in settings.json
+                try:
+                    # Mark that the API key was the most recently deleted credential
+                    save_settings(False, api_key='', last_deleted='api_key')
+                except Exception:
+                    pass
+                # Clear in-memory key as well
+                try:
+                    globals()['OPENAI_API_KEY'] = None
+                except Exception:
+                    pass
+                # If the user removed the API key, automatically switch to
+                # server mode so the app doesn't remain in local mode without
+                # a key. Persist the updated setting as well.
+                try:
+                    if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
+                        use_local_var.set(False)
+                except Exception:
+                    pass
+                try:
+                    # Persist the preference change to settings.json (no key)
+                    save_settings(False, api_key='', last_deleted='api_key')
+                except Exception:
+                    pass
+                messagebox.showinfo('API Key', 'API key removed from disk and settings. Local mode has been disabled.')
+                # If both credentials are now missing, prefer prompting for the
+                # most recently deleted one (the API key) instead of flipping
+                # modes arbitrarily.
+                try:
+                    if not get_saved_api_key() and not get_saved_endpoint():
+                        prompt_for_api_key()
+                except Exception:
+                    pass
+                return
+            # Save key into settings.json
+            try:
+                save_settings(True, api_key=k.strip())
+            except Exception:
+                pass
+            try:
+                globals()['OPENAI_API_KEY'] = k.strip()
+            except Exception:
+                pass
+            messagebox.showinfo('API Key', 'API key saved to disk and settings.')
+
+        # Build a simple Toplevel to show/manage the key
+        dlg = tk.Toplevel(root)
+        dlg.title('API Key')
+        try:
+            dlg.transient(root)
+        except Exception:
+            pass
+        tk.Label(dlg, text='OpenAI API Key (leave empty to remove):').pack(padx=12, pady=(10,4), anchor='w')
+        entry_val = tk.StringVar()
+        # Show placeholder if a file key exists (masked)
+        if file_key:
+            entry_val.set('•' * 12)
+        else:
+            entry_val.set('')
+        ent = tk.Entry(dlg, textvariable=entry_val, width=60)
+        ent.pack(padx=12, pady=(0,6))
+
+        def on_save():
+            val = ent.get().strip()
+            if val == '':
+                # confirm deletion
+                if messagebox.askyesno('Confirm', 'Remove saved API key from disk?'):
+                    save_new(None)
+                    try:
+                        dlg.destroy()
+                    except Exception:
+                        pass
+                return
+            save_new(val)
+            
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        btnf = tk.Frame(dlg)
+        btnf.pack(pady=(6,12))
+        tk.Button(btnf, text='Save', command=on_save, width=10).pack(side=tk.LEFT, padx=6)
+        tk.Button(btnf, text='Cancel', command=lambda: dlg.destroy(), width=10).pack(side=tk.LEFT, padx=6)
+        ent.focus_force()
+        try:
+            dlg.grab_set()
+            root.wait_window(dlg)
+        except Exception:
+            try:
+                root.wait_window(dlg)
+            except Exception:
+                pass
+    except Exception as e:
+        messagebox.showerror('API Key', str(e))
+    except Exception as e:
+        messagebox.showerror('API Key', str(e))
+
+
+def manage_endpoint():
+    """Open a dialog to view/update/delete the configured server endpoint."""
+    try:
+        # Load current endpoint from settings (no legacy file)
+        cur = None
+        try:
+            cur = get_saved_endpoint()
+        except Exception:
+            cur = None
+
+        def save_new(ep):
+            if ep is None or not ep.strip():
+                # Remove endpoint from settings
+                try:
+                    # Mark that the server endpoint was the most recently deleted
+                    save_settings(True if 'use_local_var' in globals() and use_local_var.get() else False, endpoint='', last_deleted='server_endpoint')
+                except Exception:
+                    pass
+                try:
+                    # If endpoint is removed, switch to local mode
+                    if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
+                        use_local_var.set(True)
+                except Exception:
+                    pass
+                messagebox.showinfo('Server endpoint', 'Server endpoint removed. Server mode has been disabled.')
+                # If both credentials are now missing, prefer prompting for the
+                # most recently deleted one (the endpoint) instead of flipping
+                # modes arbitrarily.
+                try:
+                    if not get_saved_api_key() and not get_saved_endpoint():
+                        prompt_for_endpoint()
+                except Exception:
+                    pass
+                return
+            try:
+                save_settings(False if 'use_local_var' in globals() and not use_local_var.get() else use_local_var.get(), endpoint=ep.strip())
+            except Exception:
+                pass
+            messagebox.showinfo('Server endpoint', 'Server endpoint saved to disk and settings.')
+
+        dlg = tk.Toplevel(root)
+        dlg.title('Server endpoint')
+        try:
+            dlg.transient(root)
+        except Exception:
+            pass
+        tk.Label(dlg, text='Server endpoint URL (leave empty to remove):').pack(padx=12, pady=(10,4), anchor='w')
+        entry_val = tk.StringVar()
+        if cur:
+            entry_val.set(cur)
+        else:
+            entry_val.set('')
+        ent = tk.Entry(dlg, textvariable=entry_val, width=60)
+        ent.pack(padx=12, pady=(0,6))
+
+        def on_save():
+            val = ent.get().strip()
+            if val == '':
+                if messagebox.askyesno('Confirm', 'Remove saved server endpoint from settings?'):
+                    save_new(None)
+                    try:
+                        dlg.destroy()
+                    except Exception:
+                        pass
+                return
+            save_new(val)
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        btnf = tk.Frame(dlg)
+        btnf.pack(pady=(6,12))
+        tk.Button(btnf, text='Save', command=on_save, width=10).pack(side=tk.LEFT, padx=6)
+        tk.Button(btnf, text='Cancel', command=lambda: dlg.destroy(), width=10).pack(side=tk.LEFT, padx=6)
+        ent.focus_force()
+        try:
+            dlg.grab_set()
+            root.wait_window(dlg)
+        except Exception:
+            try:
+                root.wait_window(dlg)
+            except Exception:
+                pass
+    except Exception as e:
+        messagebox.showerror('Server endpoint', str(e))
+
+
+def toggle_use_local():
+    try:
+        val = bool(use_local_var.get())
+        # Persist the toggle (leave api_key/endpoint untouched)
+        save_settings(val)
+        # If enabling local mode and no key exists, prompt for it immediately
+        if val and not get_saved_api_key():
+            try:
+                prompt_for_api_key()
+            except Exception:
+                pass
+        # If enabling server mode and no endpoint exists, prompt for it
+        if not val:
+            try:
+                if not get_saved_endpoint():
+                    prompt_for_endpoint()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+settings_menu.add_checkbutton(label='Use local OpenAI (gpt-4o-mini)', variable=use_local_var, command=toggle_use_local)
+settings_menu.add_command(label='API Key...', command=manage_api_key)
+settings_menu.add_command(label='Server endpoint...', command=lambda: manage_endpoint())
+settings_menu.add_separator()
 settings_menu.add_command(label='Clear Preferences...', command=clear_prefs)
 menubar.add_cascade(label='Settings', menu=settings_menu)
 
 # Trimmed history sent to the AI (kept short for context). full_history stores the complete
-# conversation (untrimmed) and is what we persist when saving conversations.
+# conversation (untrimmed) and is what we persist when saving conversations
 history = []  # Chat history (10 pairs max)
 full_history = []  # Complete conversation log (untrimmed), saved to conversations/
 # Track the current conversation file path (None for a new/unsaved conversation)
@@ -1051,6 +1656,79 @@ summary_label.pack(padx=8, pady=(4,6))
 show_ts_cb = tk.Checkbutton(root, text='Show timestamps', variable=show_timestamps_var, command=render_history)
 show_ts_cb.pack(padx=8, pady=(0,6), anchor='w')
 
+# NOTE: Startup prompts are performed after we load persisted settings below
+# so they honor the user's stored choice of local vs server mode. The
+# prompt_for_api_key() call used to run here before settings were
+# applied which could cause it to be skipped or run at the wrong time.
+
+# Load persisted settings (use_local_ai) and expose a Tk var for menu toggling
+try:
+    _loaded_settings = load_settings()
+    # If use_local_var already exists (created earlier for the settings menu), reuse it
+    if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
+        try:
+            use_local_var.set(bool(_loaded_settings.get('use_local_ai', False)))
+        except Exception:
+            pass
+    else:
+        use_local_var = tk.BooleanVar(value=bool(_loaded_settings.get('use_local_ai', False)))
+except Exception:
+    if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
+        try:
+            use_local_var.set(False)
+        except Exception:
+            pass
+    else:
+        use_local_var = tk.BooleanVar(value=False)
+
+# After loading persisted settings above, prompt for missing credentials
+# based on the effective mode (local vs server), then load history.
+try:
+    try:
+        # Determine saved credentials and any metadata about deletions
+        loaded_meta = load_settings() or {}
+        saved_key = get_saved_api_key()
+        saved_ep = get_saved_endpoint()
+
+        # If both are missing, prefer prompting for whichever was deleted
+        # most recently according to settings.json metadata.
+        if not saved_key and not saved_ep:
+            last = loaded_meta.get('last_credential_deleted') if isinstance(loaded_meta, dict) else None
+            if last == 'api_key':
+                prompt_for_api_key()
+            elif last == 'server_endpoint':
+                prompt_for_endpoint()
+            else:
+                # No metadata: prefer prompting for the client API key by default
+                # (users commonly run locally; this avoids defaulting to server mode
+                # on fresh installs when no settings.json exists).
+                try:
+                    prompt_for_api_key()
+                except Exception:
+                    # If that unexpectedly fails, fall back to endpoint prompt
+                    try:
+                        prompt_for_endpoint()
+                    except Exception:
+                        pass
+        else:
+            # If only one is missing, prompt for that one depending on mode
+            if 'use_local_var' in globals() and use_local_var.get():
+                if not saved_key:
+                    prompt_for_api_key()
+            else:
+                if not saved_ep:
+                    prompt_for_endpoint()
+    except Exception:
+        pass
+    # Load history after any credential dialogs so render_history can include
+    # any startup state that the user may have configured in the dialogs.
+    try:
+        load_history()
+    except Exception:
+        pass
+except Exception:
+    pass
+
 def update_summary(*args):
     f = friendliness_var.get()
     p = professionalism_var.get()
@@ -1061,7 +1739,7 @@ def update_summary(*args):
     s = sarcasm_var.get()
     i = introversion_var.get()
     tone = []
-    # Friendliness mapping (0-3)
+    # Friendliness (0-3)
     if f == 3:
         tone.append('very friendly')
     elif f == 2:
@@ -1071,7 +1749,7 @@ def update_summary(*args):
     else:
         tone.append('reserved')
 
-    # Professionalism mapping (0-2)
+    # Professionalism (0-2)
     if p == 2:
         tone.append('professional')
     elif p == 1:
@@ -1079,7 +1757,7 @@ def update_summary(*args):
     else:
         tone.append('casual')
 
-    # Profanity mapping (0-2)
+    # Profanity (0-2)
     if r == 2:
         tone.append('uses profanity')
     elif r == 1:
@@ -1103,7 +1781,7 @@ def update_summary(*args):
     else:
         tone.append('no sarcasm')
 
-    # Extroversion (0-2) -- higher value means more extroverted
+    # Extroversion (0-2)
     if i == 2:
         tone.append('extroverted')
     elif i == 1:
@@ -1190,8 +1868,10 @@ def determine_active_preset_name():
         pass
     return 'Custom'
 
-# Load history on start
-load_history()
+# prompt_for_api_key() and load_history() must be called
+# after the main Tk widgets (root, chat_area, etc.) are created. They are
+# scheduled further down, just after the chat_area setup, to avoid TclErrors
+# caused by calling widget functions before initialization
 
 # On startup, show the last-selected preset in the conversation title (if available)
 try:
@@ -1219,10 +1899,19 @@ def prompt_load_on_startup():
         conv_dir = os.path.join(os.path.dirname(__file__), 'conversations')
         os.makedirs(conv_dir, exist_ok=True)
     except Exception:
-        pass
+        conv_dir = None
     try:
-        if messagebox.askyesno('Load conversation', 'Load an existing conversation from disk?'):
-            load_conversation_file()
+        # Only prompt if the conversations/ folder contains at least one file
+        should_prompt = False
+        if conv_dir and os.path.isdir(conv_dir):
+            try:
+                items = [f for f in os.listdir(conv_dir) if os.path.isfile(os.path.join(conv_dir, f))]
+                should_prompt = len(items) > 0
+            except Exception:
+                should_prompt = False
+        if should_prompt:
+            if messagebox.askyesno('Load conversation', 'Load an existing conversation from disk?'):
+                load_conversation_file()
     except Exception:
         pass
 

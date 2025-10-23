@@ -1,22 +1,83 @@
 # Chat Max
 
-Simple Tkinter-based chat client that sends messages to a Flask server endpoint and displays replies.
+Chat Max is a lightweight GUI for interacting with personalized GPT chat partners either locally with an API key or through a server endpoint if the user chooses, while preserving the request payload shape so existing servers stay compatible.
 
-This client keeps a short persistent conversation history in `chat_history.json` and includes that history as plain-text context inside the single `message` field that is posted to the server, currently an entirely local one.
+The main program file is `chatmax-v0-3-0.py`.
 
-## Files
+## Key features
 
-- `chatmax.py` - Main Tkinter GUI client. Sends POST requests to Flask servers, formatted in specific ways.
-- `chat_history.json` - Created next to `chatmax.py` after the first message; stores recent messages (user and AI) as JSON.
+- Dual run-modes
+	- Local: call OpenAI directly (e.g. `gpt-4o-mini`) using an API key stored in `settings.json`.
+	- Server: POST the unchanged JSON payload `{"messages": [...]}` to a configured server endpoint.
 
-## Features
+- Credential management
+	- Single source of truth: `settings.json` will store `use_local_ai` boolean, `openai_api_key`, and `server_endpoint`.
+	- In-app editors under `Settings` let you add or delete the API key or server endpoint.
+	- On deletion, the app records which credential was removed last and, if both credentials are subsequently missing, will prefer to re-prompt for the most recently deleted credential.
+	- On fresh installs (no `settings.json`), the app defaults to prompting for the client API key first as that would probably be the more common option, and the last selected is prompted on future runs due to helping users get back to their chats seamlessly.
 
-- Persistent conversation history: the client stores recent messages to `chat_history.json` and includes that history as context when sending to the server (keeps compatibility with servers that accept a single `message` payload or a `messages` array depending on the script variant).
-- Non-blocking network requests: sends to the server are performed in a background thread so the UI stays responsive. While awaiting a reply the UI inserts an "AI is typing..." placeholder and disables send controls.
-- Preferences file: the client reads `preferences.txt` next to the script and appends its contents as an extra system instruction when sending requests. If `preferences.txt` is missing, the client can auto-generate a concise preferences file by asking the server to extract user preferences from recent user messages and saving the result.
-- Preference extraction and merging: when new preferences are extracted they are merged into `preferences.txt` by canonical keys (text before " is "), replacing or appending lines as necessary and truncating to a configurable maximum size.
-- Personality UI: a separate "Personality" window (menu → Personality → Configure...) exposes discrete sliders for Friendliness (0-3), Professionalism (0-2), Profanity (0-2), Age, and Gender (0-2). The slider settings are converted into a short system instruction appended to the outgoing request so you can control the assistant's voice and behavior.
-- Adaptive Personality window: the Personality window no longer uses a fixed geometry; it is resizable and the summary text will reflow as you resize the window.
-- File menu: New/Save/Load conversation support (JSON format). "New" clears the current conversation display and in-memory history. Save/Load operate on the serialized conversation format and preserve timestamps when present.
-- Read-only chat area and safe rendering: the chat display is a read-only ScrolledText widget. Programmatic updates enable/disable the widget safely, and the chat is re-rendered from the in-memory history for robustness.
-- Timestamps: history entries include timestamps and saved conversations are backward-compatible with older two-element (role, message) entries.
+- Personality mixer and presets
+	- A `Personality` dialog exposes sliders (friendliness, professionalism, profanity, age, gender, humour, sarcasm, extroversion) that are converted into a system instruction which is appended to the outgoing model messages, allowing users to influence various different aspects of their chat partner's responses.
+	- Several built-in presets are included. Save/load custom presets to the `personalities/` folder or `presets.json`.
+
+- Preference extraction
+	- The app can extract concise user preference lines from recent user messages and merge them into `preferences.txt`. This file is appended as an additional `system` message for the model to gain context and make users feel uniquely remembered.
+
+- Robust persistence and atomic writes
+	- Settings and presets are written atomically (write `.tmp` then `os.replace`) and attempt an `fsync`/`chmod` where possible.
+
+- Conversation saving and history
+	- `history` (short context) is used as the model context; `full_history` is an untrimmed log used for saving conversations.
+	- Use `Conversation -> Save...` and `Conversation -> Load...` to export/import JSON conversation files in `conversations/`.
+
+## File layout
+
+- `chatmax-v0-3-0.py` — main GUI program (run with `python 'chatmax-v0-3-0.py'`).
+- `settings.json` — created next to the script; keys:
+	- `use_local_ai` (bool)
+	- `openai_api_key` (string)
+	- `server_endpoint` (string)
+	- `last_credential_deleted` (string — `api_key` or `server_endpoint`)
+- `preferences.txt` — plain text preference lines merged from conversation extraction.
+- `presets.json` — saved presets and last selection.
+- `personalities/` — directory for per-preset JSON files (optional).
+- `conversations/` — recommended location for saved conversation JSON files. Program will automatically ask if the user wants to load their last conversation if one is found in this directory.
+
+## Running the app
+
+1. Install Python 3.
+2. From the project directory run:
+
+```bash
+python 'chatmax-v0-3-0.py'
+```
+
+On first run the program will prompt for credentials based on the startup logic:
+
+- If both API key and endpoint are missing and `last_credential_deleted` metadata is present, the app will re-prompt for whichever credential was deleted most recently.
+- If both are missing and no metadata exists (fresh install), the app prompts for the client OpenAI API key by default.
+
+## Settings and UX notes
+
+- Toggle local vs server: `Settings -> Use local OpenAI (gpt-4o-mini)` — the app will persist this choice to `settings.json`.
+- Editing credentials: `Settings -> API Key...` and `Settings -> Server endpoint...` — each dialog lets you save/paste/delete values.
+- Deleting a credential: the app persists which credential was deleted most recently (so if both end up missing it will re-prompt for the one you removed last).
+
+Security note: the API key is stored in `settings.json` in plaintext. May be updated later.
+
+## Developer notes
+
+- Calls to OpenAI are made in a background thread to keep the UI responsive. The UI inserts an assistant placeholder while waiting for the reply.
+- `call_local_openai()` and `call_server_api()` centralize the two call paths.
+- Preference extraction is routed through the same call routing (local vs server) so the extractor behaves the same way the main chat does.
+
+## Troubleshooting
+
+- If dialogs fail to appear on startup, ensure you're running the latest script version (dialogs are scheduled after UI creation to avoid Tcl errors).
+- If the app seems to ignore `settings.json`, check file permissions and confirm the file content or remove it to force a fresh startup prompt.
+
+## Planned Improvements
+
+- More settings made user-configurable, such as the max amount of preferences and conversation lines that will be 'remembered'.
+- User selection of AI models for the local call mode.
+- A change of the credential prompts that lets the user switch modes before getting into one, so they can back out or enter desired credential.

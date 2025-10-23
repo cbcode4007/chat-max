@@ -1,6 +1,6 @@
-# File:        chatmax-v0-2-8.py
+# File:        chatmax-v0-2-9.py
 # Author:      Colin Bond
-# Version:     0.2.8 (2025-10-22, addressed bug related to saved custom preset's summary not updating properly on restart)
+# Version:     0.2.9 (2025-10-23, fixed not being able to save presets anymore)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models from an endpoint.
@@ -643,13 +643,7 @@ def open_personality_window():
     def save_preset_to_file():
         # Ask for a filename to save the current slider configuration
         tpl = current_values_tuple()
-        # Ask parented simpledialog so it appears above the main window
-        try:
-            import tkinter.simpledialog as simpledialog
-            name = simpledialog.askstring('Save preset', 'Preset name (file will be saved as <name>.json):', parent=win)
-        except Exception:
-            # fallback if simpledialog import or parent arg fails
-            name = tk.simpledialog.askstring('Save preset', 'Preset name (file will be saved as <name>.json):')
+        name = tk.simpledialog.askstring('Save preset', 'Preset name (file will be saved as <name>.json):')
         if not name:
             return
         fname = name.strip()

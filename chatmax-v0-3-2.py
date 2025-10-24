@@ -1,6 +1,6 @@
 # File:        chatmax-v0-3-2.py
 # Author:      Colin Fajardo
-# Version:     0.3.2 (2025-10-24, set the default to local proper, including API call)
+# Version:     0.3.2 (2025-10-24, set default call to local proper)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models.
@@ -464,7 +464,7 @@ def load_settings():
             with open(SETTINGS_PATH, 'r', encoding='utf-8') as sf:
                 loaded = json.load(sf)
             return {
-                'use_local_ai': bool(loaded.get('use_local_ai', False)),
+                'use_local_ai': bool(loaded.get('use_local_ai', True)),
                 'openai_api_key': loaded.get('openai_api_key'),
                 'server_endpoint': loaded.get('server_endpoint'),
                 'last_credential_deleted': loaded.get('last_credential_deleted'),
@@ -472,7 +472,7 @@ def load_settings():
             }
     except Exception:
         pass
-    return {'use_local_ai': False, 'openai_api_key': None, 'server_endpoint': None, 'last_credential_deleted': None}
+    return {'use_local_ai': True, 'openai_api_key': None, 'server_endpoint': None, 'last_credential_deleted': None}
 
 
 def call_local_openai(messages_for_gpt):
@@ -1396,7 +1396,7 @@ def manage_endpoint():
                     pass
                 return
             try:
-                save_settings(True if 'use_local_var' in globals() and not use_local_var.get() else use_local_var.get(), endpoint=ep.strip())
+                save_settings(False if 'use_local_var' in globals() and not use_local_var.get() else use_local_var.get(), endpoint=ep.strip())
             except Exception:
                 pass
             messagebox.showinfo('Server endpoint', 'Server endpoint saved to disk and settings.')

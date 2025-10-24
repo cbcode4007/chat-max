@@ -30,6 +30,9 @@ The main program file is `chatmax-v0-3-0.py`.
 	- `history` (short context) is used as the model context; `full_history` is an untrimmed log used for saving conversations.
 	- Use `Conversation -> Save...` and `Conversation -> Load...` to export/import JSON conversation files in `conversations/`.
 
+- Advanced customization
+	- Users can visit the Settings menu and adjust their chat partner's amount of lines remembered in a given conversation, and amount of preferences (in lines, each one is a focused sentence like "The user's favourite colour is purple").
+
 ## File layout
 
 - `chatmax-v0-3-0.py` — main GUI program (run with `python 'chatmax-v0-3-0.py'`).

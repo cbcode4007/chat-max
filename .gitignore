@@ -1,5 +1,5 @@
 /__pycache__
-/preferences.txt
+/preferences.json
 /conversations
 /personalities
 /openai_api_key.txt

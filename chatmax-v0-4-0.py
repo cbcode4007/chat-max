@@ -1,6 +1,6 @@
-# File:        chatmax-v0-3-2.py
+# File:        chatmax-v0-4-0.py
 # Author:      Colin Fajardo
-# Version:     0.3.2 (2025-10-24, set default call to local proper)
+# Version:     0.4 (2025-10-24, user configurable short term memory and preference entry limit)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models.
@@ -14,8 +14,76 @@ import time
 import os
 
 # Preferences file path and limits
-PREFS_PATH = os.path.join(os.path.dirname(__file__), 'preferences.txt')
+# Migrate from plain text `preferences.txt` to `preferences.json` which stores
+# a list of preference entries with timestamps
+# PREFS_MAX_CHARS keeps an optional cap on the total concatenated characters for compatibility
+PREFS_PATH = os.path.join(os.path.dirname(__file__), 'preferences.json')
 PREFS_MAX_CHARS = 2000
+# Default maximum preference entries to keep (can be changed by user via UI)
+PREFS_DEFAULT_LINES = 20
+
+def load_prefs_list():
+    """Load preference entries from PREFS_PATH.
+
+    Returns a list of dicts: [{'line': str, 'ts': int}, ...] ordered oldest->newest.
+    Supports legacy plain-text files by migrating on read.
+    """
+    try:
+        if not os.path.exists(PREFS_PATH):
+            # Try to read legacy preferences.txt and migrate
+            legacy_txt = os.path.join(os.path.dirname(__file__), 'preferences.txt')
+            if os.path.exists(legacy_txt):
+                try:
+                    with open(legacy_txt, 'r', encoding='utf-8') as f:
+                        txt = f.read().strip()
+                    lines = [l.strip() for l in txt.splitlines() if l.strip()]
+                    out = []
+                    for l in lines:
+                        out.append({'line': l, 'ts': int(time.time())})
+                    # write migrated file
+                    _atomic_write(PREFS_PATH, json.dumps(out, ensure_ascii=False, indent=2))
+                    try:
+                        os.remove(legacy_txt)
+                    except Exception:
+                        pass
+                    return out
+                except Exception:
+                    return []
+            return []
+        with open(PREFS_PATH, 'r', encoding='utf-8') as pf:
+            loaded = json.load(pf)
+        out = []
+        if isinstance(loaded, list):
+            for item in loaded:
+                if isinstance(item, dict) and 'line' in item:
+                    try:
+                        ts = int(item.get('ts')) if item.get('ts') is not None else int(time.time())
+                    except Exception:
+                        ts = int(time.time())
+                    out.append({'line': str(item.get('line') or ''), 'ts': ts})
+                else:
+                    # older formats where each list item is a string
+                    out.append({'line': str(item), 'ts': int(time.time())})
+        elif isinstance(loaded, str):
+            for l in loaded.splitlines():
+                l = l.strip()
+                if l:
+                    out.append({'line': l, 'ts': int(time.time())})
+        return out
+    except Exception:
+        return []
+
+
+def save_prefs_list(entries: list):
+    """Persist preference entries (list of {'line', 'ts'}) atomically."""
+    try:
+        # Ensure serializable
+        serial = []
+        for e in entries:
+            serial.append({'line': str(e.get('line') or ''), 'ts': int(e.get('ts') or int(time.time()))})
+        _atomic_write(PREFS_PATH, json.dumps(serial, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
 
 # OpenAI API key storage (prompt at startup if not present)
 OPENAI_API_KEY = None
@@ -35,18 +103,43 @@ DEFAULT_PRESETS = {
     'Sailor-Mouth': (0, 0, 2, 30, 1, 1, 2, 0),
 }
 
+
+def _trim_history():
+    """Trim the in-memory short-term history according to HISTORY_LIMIT.
+
+    Centralized helper so callers can request trimming without repeating
+    defensive checks. HISTORY_LIMIT is clamped at startup; if missing we
+    fall back to the legacy default of 10.
+    """
+    try:
+        _limit = globals().get('HISTORY_LIMIT', None)
+        if isinstance(_limit, int):
+            while len(history) > _limit:
+                history.pop(0)
+        else:
+            while len(history) > 10:
+                history.pop(0)
+    except Exception:
+        try:
+            while len(history) > 10:
+                history.pop(0)
+        except Exception:
+            pass
+
 def send_message():
     message = entry.get()
     if not message.strip():
         return
 
-    # Add to history (keep last 10 messages). Each entry is (role, message, iso_timestamp)
+    # Add to history (keep last 10 messages), each entry is (role, message, iso_timestamp)
     ts = time.strftime('%Y-%m-%d %H:%M:%S')
     history.append(("You", message, ts))
     # Also append to the untrimmed full_history for persistence
     full_history.append(("You", message, ts))
-    if len(history) > 10:
-        history.pop(0)
+    try:
+        _trim_history()
+    except Exception:
+        pass
 
     # Determine the active preset label (use in UI instead of generic 'AI')
     try:
@@ -56,7 +149,7 @@ def send_message():
 
     # Convert GUI history to ChatGPT format under system role
     # Start with a neutral, blank-slate system instruction, all tone/style should be provided
-    # by subsequent system messages (e.g., personality_instruction and preferences).
+    # by subsequent system messages (e.g., personality_instruction and preferences)
     messages_for_gpt = [{"role": "system", "content": (
         f"Your name is {preset_label} and you are a user's chat partner. As such, you should keep responses concise, try to adapt them based on the context of the conversation, and for the most part the user's preferences or tone depending on your personality defined below."
     )}]
@@ -168,6 +261,19 @@ def send_message():
             msg = entry_item[1]
             messages_for_gpt.append({"role": "user" if role == "You" else "assistant", "content": msg})
 
+    # Ensure the current user message is present in the payload even when
+    # the in-memory short-term history limit is set to 0 (which would
+    # otherwise remove recently-appended items)
+    # Avoid duplicating if it's already present
+    try:
+        if not any(m.get('role') == 'user' and m.get('content') == message for m in messages_for_gpt):
+            messages_for_gpt.append({"role": "user", "content": message})
+    except Exception:
+        try:
+            messages_for_gpt.append({"role": "user", "content": message})
+        except Exception:
+            pass
+
     # Add user message to chat UI immediately (include timestamp if enabled) and insert AI placeholder
     try:
         # Insert the user's message immediately with colored label
@@ -226,9 +332,19 @@ def send_message():
                     )},
                 ]
 
-                # Include existing preferences as context
-                if current_prefs:
-                    gen_msgs.append({"role": "system", "content": "Existing preferences:\n" + current_prefs})
+                # Include existing preferences (migrate/load JSON) as context
+                try:
+                    existing_prefs_list = load_prefs_list()
+                    if existing_prefs_list:
+                        prefs_text = '\n'.join([p.get('line','') for p in existing_prefs_list])
+                        gen_msgs.append({"role": "system", "content": "Existing preferences:\n" + prefs_text})
+                except Exception:
+                    # Fallback to legacy text if something goes wrong
+                    try:
+                        if current_prefs:
+                            gen_msgs.append({"role": "system", "content": "Existing preferences:\n" + current_prefs})
+                    except Exception:
+                        pass
 
                 # Provide recent user-only history as context (limit to last 8 user messages)
                 # history entries may be (role, msg, ts) so don't unpack incorrectly
@@ -243,54 +359,80 @@ def send_message():
                 try:
                     # Route preference-extraction through local or server API depending on settings
                     if 'use_local_var' in globals() and use_local_var.get():
-                        print('Calling local OpenAI for prefs extraction')                        
                         gen_text = call_local_openai(gen_msgs)
                     else:
-                        print('Calling server OpenAIfor prefs extraction')
                         gen_text = call_server_api(gen_msgs)
                     extracted = gen_text.strip() if isinstance(gen_text, str) else ''
                 except Exception as e:
                     extracted = ''
 
                 if extracted:
-                    # Parse extracted pref lines and merge with current_prefs (replace by key before ' is ' if present)
+                    # New extracted preference lines
                     new_lines = [l.strip() for l in extracted.splitlines() if l.strip()]
-                    existing_lines = [l.strip() for l in (current_prefs.splitlines() if current_prefs else []) if l.strip()]
+                    try:
+                        existing = load_prefs_list() or []
+                    except Exception:
+                        existing = []
 
+                    # Build ordered key list and dict keyed by canonical pref key
                     def pref_key(line):
                         low = line.lower()
                         if ' is ' in low:
                             return low.split(' is ', 1)[0].strip()
                         return low
 
+                    keys = []
+                    mapping = {}
+                    for item in existing:
+                        ln = item.get('line','').strip()
+                        if not ln:
+                            continue
+                        k = pref_key(ln)
+                        if k in mapping:
+                            # skip duplicates in file, keep first occurrence
+                            continue
+                        mapping[k] = {'line': ln, 'ts': int(item.get('ts') or int(time.time()))}
+                        keys.append(k)
+
+                    # Apply new/updated lines: move updated keys to newest position
                     for nl in new_lines:
                         k = pref_key(nl)
-                        # build a map of existing preferences keyed by canonical key
-                        # so updates replace the correct entry without accidental collisions
-                        existing_map = {}
-                        for ex in existing_lines:
-                            existing_map[pref_key(ex)] = ex
-
-                        existing_map[k] = nl
-
-                        # Rebuild existing_lines preserving insertion order (new/updated at end if new)
-                        existing_lines = list(existing_map.values())
-
-                    # Join and truncate to PREFS_MAX_CHARS
-                    merged = '\n'.join(existing_lines).strip()
-                    if len(merged) > PREFS_MAX_CHARS:
-                        merged = merged[:PREFS_MAX_CHARS]
-                    try:
-                        # Write atomically, by writing to a temp file then replacing
-                        tmp_path = PREFS_PATH + '.tmp'
-                        with open(tmp_path, 'w', encoding='utf-8') as pf:
-                            pf.write(merged)
-                            pf.flush()
+                        entry = {'line': nl, 'ts': int(time.time())}
+                        if k in mapping:
+                            # remove existing key from keys order then re-append (now newest)
                             try:
-                                os.fsync(pf.fileno())
+                                keys.remove(k)
                             except Exception:
                                 pass
-                        os.replace(tmp_path, PREFS_PATH)
+                        mapping[k] = entry
+                        keys.append(k)
+
+                    # Rebuild final ordered list oldest->newest
+                    final = [mapping[k] for k in keys]
+
+                    # Enforce preference entry limit (drop oldest when over limit)
+                    try:
+                        limit = globals().get('PREFS_LIMIT', PREFS_DEFAULT_LINES)
+                        if isinstance(limit, int) and limit >= 0:
+                            while len(final) > int(limit):
+                                final.pop(0)
+                    except Exception:
+                        pass
+
+                    # Optionally truncate combined char length to PREFS_MAX_CHARS by trimming oldest
+                    try:
+                        combined = '\n'.join([f.get('line','') for f in final])
+                        if len(combined) > PREFS_MAX_CHARS:
+                            # remove oldest entries until under char cap
+                            while len(combined) > PREFS_MAX_CHARS and final:
+                                final.pop(0)
+                                combined = '\n'.join([f.get('line','') for f in final])
+                    except Exception:
+                        pass
+
+                    # Persist as JSON list of {line, ts}
+                    try:
+                        save_prefs_list(final)
                     except Exception:
                         pass
             except Exception:
@@ -310,13 +452,12 @@ def send_message():
             # Send user message either to the local OpenAI API (gpt-4o-mini) or to the configured server endpoint
             ai_reply = ''
             try:
+                print('\nPayload for AI call:', payload, '\n')
                 if 'use_local_var' in globals() and use_local_var.get():
                     # Local call using the stored API key
-                    print('Calling local OpenAI for ai reply')                    
                     ai_reply = call_local_openai(payload)
                 else:
                     # Centralized server call
-                    print('Calling server OpenAI for ai reply')
                     ai_reply = call_server_api(payload)
             except Exception:
                 # Re-raise to be handled by outer exception handler
@@ -327,15 +468,29 @@ def send_message():
             history.append((preset_label, ai_reply, ts))
             # Also append to the untrimmed full_history for persistence
             full_history.append((preset_label, ai_reply, ts))
-            if len(history) > 10:
-                history.pop(0)
+            try:
+                _trim_history()
+            except Exception:
+                pass
 
             # Schedule UI update on main thread: replace the last AI placeholder with real reply
             def on_success():
                 # Re-render the chat_area from history to keep it simple and robust
                 render_history()
-                send_btn.config(state=tk.NORMAL)
-                entry.config(state=tk.NORMAL)
+                try:
+                    send_btn.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+                # Avoid closing over a name 'entry' from an enclosing scope which
+                # may be shadowed by local variables earlier in this function
+                # (e.g. during preference merging)
+                # Use the global widget reference to ensure we enable the correct Entry widget
+                try:
+                    ent = globals().get('entry')
+                    if ent is not None:
+                        ent.config(state=tk.NORMAL)
+                except Exception:
+                    pass
                 try:
                     show_ts_cb.config(state=tk.NORMAL)
                 except Exception:
@@ -349,21 +504,14 @@ def send_message():
             ts = time.strftime('%Y-%m-%d %H:%M:%S')
             history.append((preset_label, err_text, ts))
             full_history.append((preset_label, err_text, ts))
-            if len(history) > 10:
-                history.pop(0)
-
-            def on_error():
-                render_history()
-                send_btn.config(state=tk.NORMAL)
-                entry.config(state=tk.NORMAL)
-                try:
-                    show_ts_cb.config(state=tk.NORMAL)
-                except Exception:
-                    pass
-
-            root.after(0, on_error)
-
-    # Start background thread for the request
+            try:
+                _trim_history()
+            except Exception:
+                pass
+            try:
+                _trim_history()
+            except Exception:
+                pass
     thread = threading.Thread(target=worker, args=(messages_for_gpt,), daemon=True)
     thread.start()
 
@@ -400,11 +548,11 @@ def _atomic_write(path: str, text: str, mode: int = 0o600):
         except Exception:
             pass
     except Exception:
-        # Best-effort only; don't raise to avoid breaking startup
+        # Best-effort only, don't raise to avoid breaking startup
         pass
 
 
-def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | None = None, last_deleted: str | None = None):
+def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | None = None, last_deleted: str | None = None, ai_history_lines: int | None = None, pref_memory_lines: int | None = None):
     """Persist settings to SETTINGS_PATH.
 
     Arguments:
@@ -435,9 +583,9 @@ def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | N
                 data['server_endpoint'] = endpoint
             else:
                 data.pop('server_endpoint', None)
-        # Record which credential was deleted most recently (if provided).
+        # Record which credential was deleted most recently (if provided)
         # Use a stable key name so startup logic can prefer prompting the
-        # most recently removed credential when both are missing.
+        # most recently removed credential when both are missing
         if last_deleted is not None:
             if last_deleted:
                 data['last_credential_deleted'] = str(last_deleted)
@@ -448,6 +596,22 @@ def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | N
             else:
                 data.pop('last_credential_deleted', None)
                 data.pop('last_credential_deleted_ts', None)
+        # Persist an optional AI history-lines limit so the UI can round-trip
+        # the user's choice. If ai_history_lines is None we leave the value
+        # unchanged; an explicit integer will be stored (and should be a
+        # small non-negative number)
+        if ai_history_lines is not None:
+            try:
+                data['ai_history_lines'] = int(ai_history_lines)
+            except Exception:
+                # ignore invalid values
+                pass
+        # Persist preference memory limit if provided
+        if pref_memory_lines is not None:
+            try:
+                data['pref_memory_lines'] = int(pref_memory_lines)
+            except Exception:
+                pass
         _atomic_write(SETTINGS_PATH, json.dumps(data, ensure_ascii=False, indent=2))
     except Exception:
         pass
@@ -468,11 +632,13 @@ def load_settings():
                 'openai_api_key': loaded.get('openai_api_key'),
                 'server_endpoint': loaded.get('server_endpoint'),
                 'last_credential_deleted': loaded.get('last_credential_deleted'),
-                'last_credential_deleted_ts': loaded.get('last_credential_deleted_ts')
+                'last_credential_deleted_ts': loaded.get('last_credential_deleted_ts'),
+                'ai_history_lines': loaded.get('ai_history_lines'),
+                'pref_memory_lines': loaded.get('pref_memory_lines')
             }
     except Exception:
         pass
-    return {'use_local_ai': True, 'openai_api_key': None, 'server_endpoint': None, 'last_credential_deleted': None}
+    return {'use_local_ai': True, 'openai_api_key': None, 'server_endpoint': None, 'last_credential_deleted': None, 'ai_history_lines': None, 'pref_memory_lines': None}
 
 
 def call_local_openai(messages_for_gpt):
@@ -522,10 +688,6 @@ def call_server_api(messages_for_gpt):
     except Exception:
         raise
 
-
-# Removed unused fallback input Toplevel helper to reduce code size.
-
-
 def prompt_for_api_key():
     """Ensure an OpenAI API key is available: if missing, show a centered modal
     dialog that cannot be closed until the user supplies (and saves) a key.
@@ -537,7 +699,7 @@ def prompt_for_api_key():
             OPENAI_API_KEY = key
             return
 
-        # No saved key: force a centered, modal, non-closable dialog
+        # No saved key - force a centered, modal, non-closable dialog
         dlg = tk.Toplevel(root)
         dlg.title('OpenAI API Key Required')
         try:
@@ -713,7 +875,7 @@ def prompt_for_endpoint():
             except Exception:
                 pass
     except Exception:
-        # fallback: leave global endpoint as-is
+        # fallback - leave global endpoint as-is
         try:
             endpoint = endpoint
         except Exception:
@@ -819,6 +981,79 @@ def load_conversation_file():
     except Exception as e:
         messagebox.showerror('Load error', str(e))
 
+def limit_chat():
+    try:
+        # Determine current value (fallback to 10 if not set)
+        cur = globals().get('HISTORY_LIMIT', None)
+        if cur is None:
+            try:
+                loaded = load_settings() or {}
+                cur = int(loaded.get('ai_history_lines') or 10)
+            except Exception:
+                cur = 10
+        # Ask the user for an integer limit (0..50)
+        val = tk.simpledialog.askinteger('AI Chat Memory Limit', 'Number of recent chat lines to include when sending context to the AI (0 = only current message):', parent=root, minvalue=0, maxvalue=50, initialvalue=cur)
+        if val is None:
+            return
+        # Persist the setting while preserving other settings
+        try:
+            cur_use = use_local_var.get() if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar) else True
+        except Exception:
+            cur_use = True
+        try:
+            save_settings(bool(cur_use), ai_history_lines=int(val))
+        except Exception:
+            pass
+        # Update runtime limit
+        try:
+            globals()['HISTORY_LIMIT'] = int(val)
+        except Exception:
+            globals()['HISTORY_LIMIT'] = cur
+        # messagebox.showinfo('AI Chat Memory Limit', f'AI history limit set to {val} lines')
+        messagebox.showinfo('AI Chat Memory Limit', 'AI short-term memory updated.')
+    except Exception as e:
+        try:
+            messagebox.showerror('AI Chat Memory Limit', str(e))
+        except Exception:
+            pass
+
+def limit_prefs():
+    try:
+        # Determine current value (fallback to PREFS_LIMIT or default)
+        cur = globals().get('PREFS_LIMIT', None)
+        if cur is None:
+            try:
+                loaded = load_settings() or {}
+                cur = int(loaded.get('pref_memory_lines') or PREFS_DEFAULT_LINES)
+            except Exception:
+                cur = PREFS_DEFAULT_LINES
+        # Ask the user for an integer limit (0..500)
+        val = tk.simpledialog.askinteger('AI Preference Memory Limit', 'Maximum number of preference lines to retain (oldest are dropped when exceeded):', parent=root, minvalue=0, maxvalue=500, initialvalue=cur)
+        if val is None:
+            return
+        # Persist the setting while preserving other settings
+        try:
+            cur_use = use_local_var.get() if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar) else True
+        except Exception:
+            cur_use = True
+        try:
+            save_settings(bool(cur_use), pref_memory_lines=int(val))
+        except Exception:
+            pass
+        # Update runtime limit
+        try:
+            globals()['PREFS_LIMIT'] = int(val)
+        except Exception:
+            globals()['PREFS_LIMIT'] = cur
+        try:
+            messagebox.showinfo('AI Preference Memory Limit', 'Preference memory limit updated.')
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            messagebox.showerror('AI Preference Memory Limit', str(e))
+        except Exception:
+            pass
 
 def clear_prefs():
     try:
@@ -918,7 +1153,7 @@ def open_personality_window():
 
     tk.Label(win, text='Personality', font=(None, 12, 'bold')).pack(pady=(6,4))
 
-    # Presets map - name: tuple of slider values
+    # Presets map - name, tuple of slider values
     presets = {
         'Default AI': (2, 1, 0, 30, 1, 0, 0, 1),
         'Helpful Professional': (2, 2, 0, 35, 1, 0, 0, 1),
@@ -1240,7 +1475,7 @@ menubar.add_cascade(label='Personality', menu=personality_menu)
 
 # Settings menu
 settings_menu = tk.Menu(menubar, tearoff=0)
-# Ensure use_local_var exists (loaded earlier near UI setup; if not, provide default)
+# Ensure use_local_var exists (loaded earlier near UI setup, if not, provide default)
 if 'use_local_var' not in globals():
     try:
         _loaded_settings = load_settings()
@@ -1249,7 +1484,7 @@ if 'use_local_var' not in globals():
         use_local_var = tk.BooleanVar(value=True)
 
 def manage_api_key():
-    # Open a dialog to view/update/delete the stored OpenAI API key
+    """Open a dialog to view/update/delete the stored OpenAI API key."""
     try:
         # Determine current saved key (from settings.json)
         file_key = None
@@ -1260,85 +1495,104 @@ def manage_api_key():
             file_key = None
 
         def save_new(k):
-            # If k is falsy, treat as a deletion request
-            if k is None or not k.strip():
-                # Remove any key embedded in settings.json
-                try:
-                    # Mark that the API key was the most recently deleted credential
-                    save_settings(False, api_key='', last_deleted='api_key')
-                except Exception:
-                    pass
-                # Clear in-memory key as well
-                try:
-                    globals()['OPENAI_API_KEY'] = None
-                except Exception:
-                    pass
-                # If the user removed the API key, automatically switch to
-                # server mode so the app doesn't remain in local mode without
-                # a key. Persist the updated setting as well.
-                try:
-                    if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
-                        use_local_var.set(False)
-                except Exception:
-                    pass
-                try:
-                    # Persist the preference change to settings.json (no key)
-                    save_settings(False, api_key='', last_deleted='api_key')
-                except Exception:
-                    pass
-                messagebox.showinfo('API Key', 'API key removed from disk and settings. Local mode has been disabled.')
-                # If both credentials are now missing, prefer prompting for the
-                # most recently deleted one (the API key) instead of flipping
-                # modes arbitrarily.
-                try:
-                    if not get_saved_api_key() and not get_saved_endpoint():
-                        prompt_for_api_key()
-                except Exception:
-                    pass
-                return
-            # Save key into settings.json
+            """Persist a new key or remove it when k is None or empty string."""
             try:
-                save_settings(True, api_key=k.strip())
+                if k is None or (isinstance(k, str) and not k.strip()):
+                    # Remove stored key
+                    try:
+                        save_settings(True if 'use_local_var' in globals() and use_local_var.get() else False, api_key='')
+                    except Exception:
+                        pass
+                    try:
+                        globals()['OPENAI_API_KEY'] = None
+                    except Exception:
+                        pass
+                    try:
+                        messagebox.showinfo('API Key', 'API key removed from disk and settings. Local mode has been disabled.')
+                    except Exception:
+                        pass
+                    try:
+                        if not get_saved_api_key() and not get_saved_endpoint():
+                            prompt_for_api_key()
+                    except Exception:
+                        pass
+                    return
+                # Save provided key
+                try:
+                    save_settings(True, api_key=str(k).strip())
+                except Exception:
+                    pass
+                try:
+                    globals()['OPENAI_API_KEY'] = str(k).strip()
+                except Exception:
+                    pass
+                try:
+                    messagebox.showinfo('API Key', 'API key saved to disk and settings.')
+                except Exception:
+                    pass
             except Exception:
                 pass
-            try:
-                globals()['OPENAI_API_KEY'] = k.strip()
-            except Exception:
-                pass
-            messagebox.showinfo('API Key', 'API key saved to disk and settings.')
 
-        # Build a simple Toplevel to show/manage the key
+        # Build the dialog
         dlg = tk.Toplevel(root)
         dlg.title('API Key')
         try:
             dlg.transient(root)
         except Exception:
             pass
-        tk.Label(dlg, text='OpenAI API Key (leave empty to remove):').pack(padx=12, pady=(10,4), anchor='w')
+        tk.Label(dlg, text='OpenAI API Key (leave empty and click Save to delete existing):').pack(padx=12, pady=(10,4), anchor='w')
         entry_val = tk.StringVar()
-        # Show placeholder if a file key exists (masked)
-        if file_key:
-            entry_val.set('•' * 12)
-        else:
-            entry_val.set('')
-        ent = tk.Entry(dlg, textvariable=entry_val, width=60)
+        entry_val.set('')
+        ent = tk.Entry(dlg, textvariable=entry_val, width=60, show='*')
         ent.pack(padx=12, pady=(0,6))
+
+        if file_key:
+            info_txt = 'A saved API key is present (not shown). Enter a new key to replace it, or leave the field empty and click Save to delete it.'
+        else:
+            info_txt = 'Enter your OpenAI API key and click Save.'
+        tk.Label(dlg, text=info_txt, wraplength=420, justify='left', fg='gray40').pack(padx=12, pady=(0,6), anchor='w')
 
         def on_save():
             val = ent.get().strip()
             if val == '':
-                # confirm deletion
+                # User submitted an empty string -> confirm deletion if a key exists
+                if file_key:
+                    try:
+                        if messagebox.askyesno('Confirm', 'Remove saved API key from disk?'):
+                            save_new(None)
+                            try:
+                                dlg.destroy()
+                            except Exception:
+                                pass
+                            return
+                        else:
+                            # Leave dialog open
+                            return
+                    except Exception:
+                        return
+                else:
+                    # No stored key and empty input -> nothing to save
+                    try:
+                        dlg.destroy()
+                    except Exception:
+                        pass
+                    return
+            # Save provided key
+            save_new(val)
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        def on_remove():
+            # Explicit remove button (same behavior as saving empty)
+            try:
                 if messagebox.askyesno('Confirm', 'Remove saved API key from disk?'):
                     save_new(None)
                     try:
                         dlg.destroy()
                     except Exception:
                         pass
-                return
-            save_new(val)
-            
-            try:
-                dlg.destroy()
             except Exception:
                 pass
 
@@ -1356,9 +1610,10 @@ def manage_api_key():
             except Exception:
                 pass
     except Exception as e:
-        messagebox.showerror('API Key', str(e))
-    except Exception as e:
-        messagebox.showerror('API Key', str(e))
+        try:
+            messagebox.showerror('API Key', str(e))
+        except Exception:
+            pass
 
 
 def manage_endpoint():
@@ -1387,8 +1642,7 @@ def manage_endpoint():
                     pass
                 messagebox.showinfo('Server endpoint', 'Server endpoint removed. Server mode has been disabled.')
                 # If both credentials are now missing, prefer prompting for the
-                # most recently deleted one (the endpoint) instead of flipping
-                # modes arbitrarily.
+                # most recently deleted one
                 try:
                     if not get_saved_api_key() and not get_saved_endpoint():
                         prompt_for_endpoint()
@@ -1416,7 +1670,7 @@ def manage_endpoint():
         ent = tk.Entry(dlg, textvariable=entry_val, width=60)
         ent.pack(padx=12, pady=(0,6))
 
-        def on_save():
+        def on_save():            
             val = ent.get().strip()
             if val == '':
                 if messagebox.askyesno('Confirm', 'Remove saved server endpoint from settings?'):
@@ -1470,10 +1724,12 @@ def toggle_use_local():
     except Exception:
         pass
 
-settings_menu.add_checkbutton(label='Use local OpenAI (gpt-4o-mini)', variable=use_local_var, command=toggle_use_local)
+settings_menu.add_checkbutton(label='Use Local OpenAI API Key', variable=use_local_var, command=toggle_use_local)
 settings_menu.add_command(label='API Key...', command=manage_api_key)
-settings_menu.add_command(label='Server endpoint...', command=lambda: manage_endpoint())
+settings_menu.add_command(label='Server Endpoint...', command=lambda: manage_endpoint())
 settings_menu.add_separator()
+settings_menu.add_command(label='AI Chat Memory Limit...', command=limit_chat)
+settings_menu.add_command(label='AI Preference Memory Limit...', command=limit_prefs)
 settings_menu.add_command(label='Clear Preferences...', command=clear_prefs)
 menubar.add_cascade(label='Settings', menu=settings_menu)
 
@@ -1530,7 +1786,7 @@ def render_history():
     chat_area.config(state=tk.NORMAL)
     chat_area.delete(1.0, tk.END)
     # Show the full, untrimmed conversation to the user (full_history)
-    # `history` remains the trimmed list used for model context.
+    # `history` remains the trimmed list used for model context
     for entry_item in full_history:
         if len(entry_item) >= 3:
             role, msg, ts = entry_item[0], entry_item[1], entry_item[2]
@@ -1642,8 +1898,8 @@ try:
                 sarcasm_var.set(vals[6])
                 introversion_var.set(vals[7])
             # If a saved preset was applied, the UI will be refreshed later after
-            # summary/title helper functions are defined. Avoid calling them here
-            # to prevent editor/static-analysis 'not defined' warnings.
+            # summary/title helper functions are defined
+            # Avoid calling them here to prevent editor/static-analysis 'not defined' warnings
 except Exception:
     pass
 
@@ -1662,9 +1918,9 @@ show_ts_cb = tk.Checkbutton(root, text='Show timestamps', variable=show_timestam
 show_ts_cb.pack(padx=8, pady=(0,6), anchor='w')
 
 # NOTE: Startup prompts are performed after we load persisted settings below
-# so they honor the user's stored choice of local vs server mode. The
+# so they honor the user's stored choice of local vs server mode, the
 # prompt_for_api_key() call used to run here before settings were
-# applied which could cause it to be skipped or run at the wrong time.
+# applied which could cause it to be skipped or run at the wrong time
 
 # Load persisted settings (use_local_ai) and expose a Tk var for menu toggling
 try:
@@ -1686,8 +1942,35 @@ except Exception:
     else:
         use_local_var = tk.BooleanVar(value=True)
 
+# Initialize runtime history & preference limits from settings (clamp to reasonable bounds)
+try:
+    _hist_val = None
+    try:
+        _hist_val = int(_loaded_settings.get('ai_history_lines')) if isinstance(_loaded_settings, dict) and _loaded_settings.get('ai_history_lines') is not None else None
+    except Exception:
+        _hist_val = None
+    if _hist_val is None:
+        HISTORY_LIMIT = 20
+    else:
+        HISTORY_LIMIT = max(0, min(50, int(_hist_val)))
+except Exception:
+    HISTORY_LIMIT = 20
+
+try:
+    _pref_val = None
+    try:
+        _pref_val = int(_loaded_settings.get('pref_memory_lines')) if isinstance(_loaded_settings, dict) and _loaded_settings.get('pref_memory_lines') is not None else None
+    except Exception:
+        _pref_val = None
+    if _pref_val is None:
+        PREFS_LIMIT = PREFS_DEFAULT_LINES
+    else:
+        PREFS_LIMIT = max(0, min(50, int(_pref_val)))
+except Exception:
+    PREFS_LIMIT = PREFS_DEFAULT_LINES
+
 # After loading persisted settings above, prompt for missing credentials
-# based on the effective mode (local vs server), then load history.
+# based on the effective mode (local vs server), then load history
 try:
     try:
         # Determine saved credentials and any metadata about deletions
@@ -1699,7 +1982,7 @@ try:
         SERVER_ENDPOINT = saved_ep  # set global variable for immediate use
 
         # If both are missing, prefer prompting for whichever was deleted
-        # most recently according to settings.json metadata.
+        # most recently according to settings.json metadata
         if not saved_key and not saved_ep:
             last = loaded_meta.get('last_credential_deleted') if isinstance(loaded_meta, dict) else None
             if last == 'api_key':
@@ -1708,8 +1991,8 @@ try:
                 prompt_for_endpoint()
             else:
                 # No metadata: prefer prompting for the client API key by default
-                # (users commonly run locally; this avoids defaulting to server mode
-                # on fresh installs when no settings.json exists).
+                # (users commonly run locally, this avoids defaulting to server mode
+                # on fresh installs when no settings.json exists)
                 try:
                     prompt_for_api_key()
                 except Exception:
@@ -1729,7 +2012,7 @@ try:
     except Exception:
         pass
     # Load history after any credential dialogs so render_history can include
-    # any startup state that the user may have configured in the dialogs.
+    # any startup state that the user may have configured in the dialogs
     try:
         load_history()
     except Exception:
@@ -1875,11 +2158,6 @@ def determine_active_preset_name():
     except Exception:
         pass
     return 'Custom'
-
-# prompt_for_api_key() and load_history() must be called
-# after the main Tk widgets (root, chat_area, etc.) are created. They are
-# scheduled further down, just after the chat_area setup, to avoid TclErrors
-# caused by calling widget functions before initialization
 
 # On startup, show the last-selected preset in the conversation title (if available)
 try:

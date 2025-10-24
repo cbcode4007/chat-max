@@ -1,6 +1,6 @@
-# File:        chatmax-v0-3-0.py
+# File:        chatmax-v0-3-1.py
 # Author:      Colin Fajardo
-# Version:     0.3.0 (2025-10-23, implemented settings for local API key or server endpoint usage)
+# Version:     0.3.1 (2025-10-24, fixed user API key and endpoint not registering properly on call)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models.
@@ -242,9 +242,11 @@ def send_message():
                 # Try to get extracted preferences from the server
                 try:
                     # Route preference-extraction through local or server API depending on settings
-                    if 'use_local_var' in globals() and use_local_var.get():                        
+                    if 'use_local_var' in globals() and use_local_var.get():
+                        print('Calling local OpenAI for prefs extraction')                        
                         gen_text = call_local_openai(gen_msgs)
-                    else:                        
+                    else:
+                        print('Calling server OpenAIfor prefs extraction')
                         gen_text = call_server_api(gen_msgs)
                     extracted = gen_text.strip() if isinstance(gen_text, str) else ''
                 except Exception as e:
@@ -309,10 +311,12 @@ def send_message():
             ai_reply = ''
             try:
                 if 'use_local_var' in globals() and use_local_var.get():
-                    # Local call using the stored API key                    
+                    # Local call using the stored API key
+                    print('Calling local OpenAI for ai reply')                    
                     ai_reply = call_local_openai(payload)
                 else:
-                    # Centralized server call                    
+                    # Centralized server call
+                    print('Calling server OpenAI for ai reply')
                     ai_reply = call_server_api(payload)
             except Exception:
                 # Re-raise to be handled by outer exception handler
@@ -475,6 +479,7 @@ def call_local_openai(messages_for_gpt):
     """Call OpenAI's chat completions API (gpt-4o-mini) using the stored API key.
     Returns the assistant reply string.
     """
+    OPENAI_API_KEY = get_saved_api_key()
     if not OPENAI_API_KEY:
         raise RuntimeError('No OpenAI API key available for local calls')
     try:
@@ -1689,6 +1694,9 @@ try:
         loaded_meta = load_settings() or {}
         saved_key = get_saved_api_key()
         saved_ep = get_saved_endpoint()
+
+        OPENAI_API_KEY = saved_key  # set global variable for immediate use
+        SERVER_ENDPOINT = saved_ep  # set global variable for immediate use
 
         # If both are missing, prefer prompting for whichever was deleted
         # most recently according to settings.json metadata.

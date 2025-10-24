@@ -1,6 +1,6 @@
-# File:        chatmax-v0-3-1.py
+# File:        chatmax-v0-3-2.py
 # Author:      Colin Fajardo
-# Version:     0.3.1 (2025-10-24, fixed user API key and endpoint not registering properly on call)
+# Version:     0.3.2 (2025-10-24, set the default to local proper, including API call)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models.
@@ -1396,7 +1396,7 @@ def manage_endpoint():
                     pass
                 return
             try:
-                save_settings(False if 'use_local_var' in globals() and not use_local_var.get() else use_local_var.get(), endpoint=ep.strip())
+                save_settings(True if 'use_local_var' in globals() and not use_local_var.get() else use_local_var.get(), endpoint=ep.strip())
             except Exception:
                 pass
             messagebox.showinfo('Server endpoint', 'Server endpoint saved to disk and settings.')
@@ -1672,19 +1672,19 @@ try:
     # If use_local_var already exists (created earlier for the settings menu), reuse it
     if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
         try:
-            use_local_var.set(bool(_loaded_settings.get('use_local_ai', False)))
+            use_local_var.set(bool(_loaded_settings.get('use_local_ai', True)))
         except Exception:
             pass
     else:
-        use_local_var = tk.BooleanVar(value=bool(_loaded_settings.get('use_local_ai', False)))
+        use_local_var = tk.BooleanVar(value=bool(_loaded_settings.get('use_local_ai', True)))
 except Exception:
     if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
         try:
-            use_local_var.set(False)
+            use_local_var.set(True)
         except Exception:
             pass
     else:
-        use_local_var = tk.BooleanVar(value=False)
+        use_local_var = tk.BooleanVar(value=True)
 
 # After loading persisted settings above, prompt for missing credentials
 # based on the effective mode (local vs server), then load history.

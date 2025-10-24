@@ -81,6 +81,5 @@ Security note: the API key is stored in `settings.json` in plaintext. May be upd
 
 ## Planned Improvements
 
-- More settings made user-configurable, such as the max amount of preferences and conversation lines that will be 'remembered'.
 - User selection of AI models for the local call mode.
 - A change of the credential prompts that lets the user switch modes before getting into one, so they can back out or enter desired credential.

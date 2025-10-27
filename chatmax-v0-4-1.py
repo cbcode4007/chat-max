@@ -1,6 +1,6 @@
-# File:        chatmax-v0-4-0.py
+# File:        chatmax-v0-4-1.py
 # Author:      Colin Fajardo
-# Version:     0.4 (2025-10-24, user configurable short term memory and preference entry limit)
+# Version:     0.4.1 (2025-10-27, extracted preference injection location tweak and user ability to switch prompts)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models.
@@ -14,8 +14,7 @@ import time
 import os
 
 # Preferences file path and limits
-# Migrate from plain text `preferences.txt` to `preferences.json` which stores
-# a list of preference entries with timestamps
+# Preferences are stored in `preferences.json` as a list of timestamped entries.
 # PREFS_MAX_CHARS keeps an optional cap on the total concatenated characters for compatibility
 PREFS_PATH = os.path.join(os.path.dirname(__file__), 'preferences.json')
 PREFS_MAX_CHARS = 2000
@@ -23,32 +22,9 @@ PREFS_MAX_CHARS = 2000
 PREFS_DEFAULT_LINES = 20
 
 def load_prefs_list():
-    """Load preference entries from PREFS_PATH.
-
-    Returns a list of dicts: [{'line': str, 'ts': int}, ...] ordered oldest->newest.
-    Supports legacy plain-text files by migrating on read.
-    """
     try:
         if not os.path.exists(PREFS_PATH):
-            # Try to read legacy preferences.txt and migrate
-            legacy_txt = os.path.join(os.path.dirname(__file__), 'preferences.txt')
-            if os.path.exists(legacy_txt):
-                try:
-                    with open(legacy_txt, 'r', encoding='utf-8') as f:
-                        txt = f.read().strip()
-                    lines = [l.strip() for l in txt.splitlines() if l.strip()]
-                    out = []
-                    for l in lines:
-                        out.append({'line': l, 'ts': int(time.time())})
-                    # write migrated file
-                    _atomic_write(PREFS_PATH, json.dumps(out, ensure_ascii=False, indent=2))
-                    try:
-                        os.remove(legacy_txt)
-                    except Exception:
-                        pass
-                    return out
-                except Exception:
-                    return []
+            # No preferences file yet; return empty list.
             return []
         with open(PREFS_PATH, 'r', encoding='utf-8') as pf:
             loaded = json.load(pf)
@@ -75,7 +51,6 @@ def load_prefs_list():
 
 
 def save_prefs_list(entries: list):
-    """Persist preference entries (list of {'line', 'ts'}) atomically."""
     try:
         # Ensure serializable
         serial = []
@@ -105,12 +80,6 @@ DEFAULT_PRESETS = {
 
 
 def _trim_history():
-    """Trim the in-memory short-term history according to HISTORY_LIMIT.
-
-    Centralized helper so callers can request trimming without repeating
-    defensive checks. HISTORY_LIMIT is clamped at startup; if missing we
-    fall back to the legacy default of 10.
-    """
     try:
         _limit = globals().get('HISTORY_LIMIT', None)
         if isinstance(_limit, int):
@@ -238,22 +207,8 @@ def send_message():
     if personality_instruction:
         messages_for_gpt.append({"role": "system", "content": personality_instruction})
 
-    # If a preferences.txt file exists next to this script, append its contents as an additional system message
-    try:
-        import os
-        prefs_path = os.path.join(os.path.dirname(__file__), 'preferences.txt')
-        if os.path.exists(prefs_path):
-            with open(prefs_path, 'r', encoding='utf-8') as pf:
-                prefs_text = pf.read().strip()
-                if prefs_text:
-                    messages_for_gpt.append({"role": "system", "content": prefs_text})
-        else:
-            # Create an empty preferences.txt file
-            with open(prefs_path, 'w', encoding='utf-8') as pf:
-                pf.write('')
-    except Exception:
-        # Ignore preference-load errors, do not change payload if this reading fails
-        pass
+    # Preferences are loaded from `preferences.json` later in the worker and
+    # inserted as a system message alongside personality instructions.
     # Add each entry under short term history to the payload
     for entry_item in history:
         if len(entry_item) >= 2:
@@ -407,7 +362,7 @@ def send_message():
                         mapping[k] = entry
                         keys.append(k)
 
-                    # Rebuild final ordered list oldest->newest
+                    # Rebuild final ordered list oldest to newest
                     final = [mapping[k] for k in keys]
 
                     # Enforce preference entry limit (drop oldest when over limit)
@@ -439,13 +394,35 @@ def send_message():
                 # If anything in prefs extraction fails, continue without blocking the main request
                 pass
 
-            # If preferences file exists now, append its contents as a system message
+            # If preferences file exists now, insert its contents as a system message
+            # before any chat history/user messages so preferences are treated as
+            # system-level context alongside personality instructions.
             try:
                 if os.path.exists(PREFS_PATH):
                     with open(PREFS_PATH, 'r', encoding='utf-8') as pf:
                         prefs_text = pf.read().strip()
                         if prefs_text:
-                            payload.append({"role": "system", "content": prefs_text})
+                            # Find the first index where role != 'system' and insert
+                            insert_idx = 0
+                            for idx, m in enumerate(payload):
+                                try:
+                                    if m.get('role') != 'system':
+                                        insert_idx = idx
+                                        break
+                                except Exception:
+                                    # If message shape unexpected, continue searching
+                                    continue
+                            else:
+                                # all items were system messages; append at end
+                                insert_idx = len(payload)
+                            try:
+                                payload.insert(insert_idx, {"role": "system", "content": prefs_text})
+                            except Exception:
+                                # Fallback to appending if insert fails
+                                try:
+                                    payload.append({"role": "system", "content": prefs_text})
+                                except Exception:
+                                    pass
             except Exception:
                 pass
 
@@ -515,24 +492,7 @@ def send_message():
     thread = threading.Thread(target=worker, args=(messages_for_gpt,), daemon=True)
     thread.start()
 
-
-def get_saved_api_key():
-    """Return an API key stored in settings.json or None."""
-    try:
-        loaded = load_settings()
-        if isinstance(loaded, dict):
-            key = loaded.get('openai_api_key')
-            if key:
-                return key
-    except Exception:
-        pass
-    return None
-
-
 def _atomic_write(path: str, text: str, mode: int = 0o600):
-    """Write text atomically to path and set permissions.
-    Uses a tmp file + os.replace and attempts fsync; best-effort chmod.
-    """
     try:
         tmp = path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as tf:
@@ -553,15 +513,6 @@ def _atomic_write(path: str, text: str, mode: int = 0o600):
 
 
 def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | None = None, last_deleted: str | None = None, ai_history_lines: int | None = None, pref_memory_lines: int | None = None):
-    """Persist settings to SETTINGS_PATH.
-
-    Arguments:
-    - use_local: whether to enable local OpenAI usage
-    - api_key: if provided:
-        - a non-empty string will store the API key in settings.json
-        - an empty string ('') will remove any stored key from settings.json
-        - None will leave existing openai_api_key in settings.json untouched
-    """
     try:
         # Load existing settings to preserve unrelated fields
         data = {}
@@ -618,11 +569,6 @@ def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | N
 
 
 def load_settings():
-    """Return stored settings dict or defaults.
-
-    Also returns any metadata about the last deleted credential so startup
-    logic can prefer prompting for the most recently removed credential.
-    """
     try:
         if os.path.exists(SETTINGS_PATH):
             with open(SETTINGS_PATH, 'r', encoding='utf-8') as sf:
@@ -642,9 +588,6 @@ def load_settings():
 
 
 def call_local_openai(messages_for_gpt):
-    """Call OpenAI's chat completions API (gpt-4o-mini) using the stored API key.
-    Returns the assistant reply string.
-    """
     OPENAI_API_KEY = get_saved_api_key()
     if not OPENAI_API_KEY:
         raise RuntimeError('No OpenAI API key available for local calls')
@@ -675,9 +618,6 @@ def call_local_openai(messages_for_gpt):
 
 
 def call_server_api(messages_for_gpt):
-    """Send messages to the configured server endpoint and return the assistant reply string.
-    This centralizes the inlined requests.post call so both pathways live next to each other.
-    """
     try:
         # Prefer any user-configured endpoint stored in settings.json
         ep = get_saved_endpoint() or endpoint
@@ -688,10 +628,18 @@ def call_server_api(messages_for_gpt):
     except Exception:
         raise
 
+def get_saved_api_key():
+    try:
+        loaded = load_settings()
+        if isinstance(loaded, dict):
+            key = loaded.get('openai_api_key')
+            if key:
+                return key
+    except Exception:
+        pass
+    return None
+
 def prompt_for_api_key():
-    """Ensure an OpenAI API key is available: if missing, show a centered modal
-    dialog that cannot be closed until the user supplies (and saves) a key.
-    """
     global OPENAI_API_KEY
     try:
         key = get_saved_api_key()
@@ -717,14 +665,36 @@ def prompt_for_api_key():
         entry = tk.Entry(dlg, textvariable=key_var, show='*', width=56)
         entry.pack(padx=16, pady=(0,8))
 
-        info_lbl = tk.Label(dlg, text='The key will be saved locally to allow offline use of OpenAI. It will not be displayed again.', wraplength=420, justify='left', fg='gray40')
-        info_lbl.pack(padx=16, pady=(0,8))
-
         btn_frame = tk.Frame(dlg)
         btn_frame.pack(pady=(6,14))
 
         save_btn = tk.Button(btn_frame, text='Save and continue', state=tk.DISABLED)
         save_btn.pack(side=tk.LEFT, padx=6)
+        # Allow the user to switch to server-mode prompt instead
+        def switch_to_server():
+            try:
+                # persist toggle to server mode
+                try:
+                    save_settings(False)
+                except Exception:
+                    pass
+                try:
+                    use_local_var.set(False)
+                except Exception:
+                    pass
+                try:
+                    dlg.destroy()
+                except Exception:
+                    pass
+                # If no server endpoint exists, prompt for it now
+                try:
+                    if not get_saved_endpoint():
+                        prompt_for_endpoint()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        tk.Button(btn_frame, text='Use Server Instead', command=switch_to_server).pack(side=tk.LEFT, padx=6)
 
         def on_change(*_):
             val = key_var.get().strip()
@@ -784,7 +754,6 @@ def prompt_for_api_key():
 
 
 def get_saved_endpoint():
-    """Return the saved server endpoint from settings.json or None."""
     try:
         loaded = load_settings()
         if isinstance(loaded, dict):
@@ -797,7 +766,6 @@ def get_saved_endpoint():
 
 
 def prompt_for_endpoint():
-    """Prompt the user for a server endpoint when server mode is entered and none is configured."""
     global endpoint
     try:
         ep = get_saved_endpoint()
@@ -824,6 +792,30 @@ def prompt_for_endpoint():
         btn_frame.pack(pady=(6,14))
         save_btn = tk.Button(btn_frame, text='Save and continue', state=tk.DISABLED)
         save_btn.pack(side=tk.LEFT, padx=6)
+        # Allow the user to switch to local-mode prompt instead
+        def switch_to_local():
+            try:
+                try:
+                    save_settings(True)
+                except Exception:
+                    pass
+                try:
+                    use_local_var.set(True)
+                except Exception:
+                    pass
+                try:
+                    dlg.destroy()
+                except Exception:
+                    pass
+                # If no API key exists, prompt for it now
+                try:
+                    if not get_saved_api_key():
+                        prompt_for_api_key()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        tk.Button(btn_frame, text='Use Local Instead', command=switch_to_local).pack(side=tk.LEFT, padx=6)
 
         def on_change(*_):
             val = ep_var.get().strip()
@@ -900,7 +892,6 @@ def new_conversation():
             unsaved_changes = False
         except Exception:
             pass
-
 
 def save_conversation():
     # Default to the 'conversations' folder next to the script
@@ -1484,115 +1475,71 @@ if 'use_local_var' not in globals():
         use_local_var = tk.BooleanVar(value=True)
 
 def manage_api_key():
-    """Open a dialog to view/update/delete the stored OpenAI API key."""
     try:
-        # Determine current saved key (from settings.json)
-        file_key = None
+        # Load current API key from settings
+        cur = None
         try:
-            loaded = load_settings()
-            file_key = loaded.get('openai_api_key') if isinstance(loaded, dict) else None
+            cur = get_saved_api_key()
         except Exception:
-            file_key = None
+            cur = None
 
-        def save_new(k):
-            """Persist a new key or remove it when k is None or empty string."""
+        def save_new(key):
+            if key is None or not key.strip():
+                # Remove API key from settings
+                try:
+                    # Mark that the API key was the most recently deleted
+                    save_settings(True if 'use_local_var' in globals() and use_local_var.get() else False, api_key='', last_deleted='api_key')
+                except Exception:
+                    pass
+                try:
+                    # If API key is removed, switch to server mode
+                    if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar):
+                        use_local_var.set(False)
+                except Exception:
+                    pass
+                messagebox.showinfo('API Key', 'API key removed. Local mode has been disabled.')
+                # If both credentials are now missing, prefer prompting for the
+                # most recently deleted one
+                try:
+                    if not get_saved_api_key() and not get_saved_endpoint():
+                        prompt_for_api_key()
+                except Exception:
+                    pass
+                return
             try:
-                if k is None or (isinstance(k, str) and not k.strip()):
-                    # Remove stored key
-                    try:
-                        save_settings(True if 'use_local_var' in globals() and use_local_var.get() else False, api_key='')
-                    except Exception:
-                        pass
-                    try:
-                        globals()['OPENAI_API_KEY'] = None
-                    except Exception:
-                        pass
-                    try:
-                        messagebox.showinfo('API Key', 'API key removed from disk and settings. Local mode has been disabled.')
-                    except Exception:
-                        pass
-                    try:
-                        if not get_saved_api_key() and not get_saved_endpoint():
-                            prompt_for_api_key()
-                    except Exception:
-                        pass
-                    return
-                # Save provided key
-                try:
-                    save_settings(True, api_key=str(k).strip())
-                except Exception:
-                    pass
-                try:
-                    globals()['OPENAI_API_KEY'] = str(k).strip()
-                except Exception:
-                    pass
-                try:
-                    messagebox.showinfo('API Key', 'API key saved to disk and settings.')
-                except Exception:
-                    pass
+                save_settings(False if 'use_local_var' in globals() and not use_local_var.get() else use_local_var.get(), api_key=key.strip())
             except Exception:
                 pass
+            messagebox.showinfo('API Key', 'API key saved to disk and settings.')
 
-        # Build the dialog
         dlg = tk.Toplevel(root)
         dlg.title('API Key')
         try:
             dlg.transient(root)
         except Exception:
             pass
-        tk.Label(dlg, text='OpenAI API Key (leave empty and click Save to delete existing):').pack(padx=12, pady=(10,4), anchor='w')
+        tk.Label(dlg, text='API Key (leave empty to remove):').pack(padx=12, pady=(10,4), anchor='w')
         entry_val = tk.StringVar()
-        entry_val.set('')
-        ent = tk.Entry(dlg, textvariable=entry_val, width=60, show='*')
+        if cur:
+            entry_val.set(cur)
+        else:
+            entry_val.set('')
+        ent = tk.Entry(dlg, textvariable=entry_val, width=60)
         ent.pack(padx=12, pady=(0,6))
 
-        if file_key:
-            info_txt = 'A saved API key is present (not shown). Enter a new key to replace it, or leave the field empty and click Save to delete it.'
-        else:
-            info_txt = 'Enter your OpenAI API key and click Save.'
-        tk.Label(dlg, text=info_txt, wraplength=420, justify='left', fg='gray40').pack(padx=12, pady=(0,6), anchor='w')
-
-        def on_save():
+        def on_save():            
             val = ent.get().strip()
             if val == '':
-                # User submitted an empty string -> confirm deletion if a key exists
-                if file_key:
-                    try:
-                        if messagebox.askyesno('Confirm', 'Remove saved API key from disk?'):
-                            save_new(None)
-                            try:
-                                dlg.destroy()
-                            except Exception:
-                                pass
-                            return
-                        else:
-                            # Leave dialog open
-                            return
-                    except Exception:
-                        return
-                else:
-                    # No stored key and empty input -> nothing to save
-                    try:
-                        dlg.destroy()
-                    except Exception:
-                        pass
-                    return
-            # Save provided key
-            save_new(val)
-            try:
-                dlg.destroy()
-            except Exception:
-                pass
-
-        def on_remove():
-            # Explicit remove button (same behavior as saving empty)
-            try:
-                if messagebox.askyesno('Confirm', 'Remove saved API key from disk?'):
+                if messagebox.askyesno('Confirm', 'Remove saved API key from settings?'):
                     save_new(None)
                     try:
                         dlg.destroy()
                     except Exception:
                         pass
+                return
+            save_new(val)
+            try:
+                dlg.destroy()
             except Exception:
                 pass
 
@@ -1610,16 +1557,11 @@ def manage_api_key():
             except Exception:
                 pass
     except Exception as e:
-        try:
-            messagebox.showerror('API Key', str(e))
-        except Exception:
-            pass
-
+        messagebox.showerror('API Key', str(e))
 
 def manage_endpoint():
-    """Open a dialog to view/update/delete the configured server endpoint."""
     try:
-        # Load current endpoint from settings (no legacy file)
+        # Load current endpoint from settings
         cur = None
         try:
             cur = get_saved_endpoint()

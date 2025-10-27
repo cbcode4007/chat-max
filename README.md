@@ -2,13 +2,13 @@
 
 Chat Max is a lightweight GUI for interacting with personalized GPT chat partners either locally with an API key or through a server endpoint if the user chooses, while preserving the request payload shape so existing servers stay compatible.
 
-The main program file is `chatmax-v0-3-0.py`.
+The main program file is `chatmax-v0-4-1.py`.
 
 ## Key features
 
 - Dual run-modes
 	- Local: call OpenAI directly (e.g. `gpt-4o-mini`) using an API key stored in `settings.json`.
-	- Server: POST the unchanged JSON payload `{"messages": [...]}` to a configured server endpoint.
+	- Server: POST the unchanged JSON payload `{"messages": [...]}` to any configured server endpoint.
 
 - Credential management
 	- Single source of truth: `settings.json` will store `use_local_ai` boolean, `openai_api_key`, and `server_endpoint`.
@@ -21,7 +21,7 @@ The main program file is `chatmax-v0-3-0.py`.
 	- Several built-in presets are included. Save/load custom presets to the `personalities/` folder or `presets.json`.
 
 - Preference extraction
-	- The app can extract concise user preference lines from recent user messages and merge them into `preferences.txt`. This file is appended as an additional `system` message for the model to gain context and make users feel uniquely remembered.
+	- The app can extract concise user preference lines from recent user messages and merge them into `preferences.json` (a timestamped JSON list). This file is inserted as an additional `system` message for the model to gain context and make users feel uniquely remembered.
 
 - Robust persistence and atomic writes
 	- Settings and presets are written atomically (write `.tmp` then `os.replace`) and attempt an `fsync`/`chmod` where possible.
@@ -35,13 +35,13 @@ The main program file is `chatmax-v0-3-0.py`.
 
 ## File layout
 
-- `chatmax-v0-3-0.py` — main GUI program (run with `python 'chatmax-v0-3-0.py'`).
+- `chatmax-v0-4-1.py` — main GUI program (run with `python 'chatmax-v0-4-1.py'`).
 - `settings.json` — created next to the script; keys:
 	- `use_local_ai` (bool)
 	- `openai_api_key` (string)
 	- `server_endpoint` (string)
 	- `last_credential_deleted` (string — `api_key` or `server_endpoint`)
-- `preferences.txt` — plain text preference lines merged from conversation extraction.
+- `preferences.json` — JSON list of timestamped preference entries merged from conversation extraction.
 - `presets.json` — saved presets and last selection.
 - `personalities/` — directory for per-preset JSON files (optional).
 - `conversations/` — recommended location for saved conversation JSON files. Program will automatically ask if the user wants to load their last conversation if one is found in this directory.
@@ -52,7 +52,7 @@ The main program file is `chatmax-v0-3-0.py`.
 2. From the project directory run:
 
 ```bash
-python 'chatmax-v0-3-0.py'
+python 'chatmax-v0-4-1.py'
 ```
 
 On first run the program will prompt for credentials based on the startup logic:

@@ -1,6 +1,6 @@
-# File:        chatmax-v0-4-1.py
+# File:        chatmax-v0-4-2.py
 # Author:      Colin Fajardo
-# Version:     0.4.1 (2025-10-27, extracted preference injection location tweak and user ability to switch prompts)
+# Version:     0.4.2 (2025-10-28, added model selection, updated local call with different prompt parameters for models, limit sliders)
 #
 # Description: A simple chat interface for configuring and interacting with 
 #              personalized, learning GPT models.
@@ -12,6 +12,7 @@ import json
 import threading
 import time
 import os
+from openai import OpenAI
 
 # Preferences file path and limits
 # Preferences are stored in `preferences.json` as a list of timestamped entries.
@@ -428,8 +429,7 @@ def send_message():
 
             # Send user message either to the local OpenAI API (gpt-4o-mini) or to the configured server endpoint
             ai_reply = ''
-            try:
-                print('\nPayload for AI call:', payload, '\n')
+            try:                
                 if 'use_local_var' in globals() and use_local_var.get():
                     # Local call using the stored API key
                     ai_reply = call_local_openai(payload)
@@ -512,7 +512,7 @@ def _atomic_write(path: str, text: str, mode: int = 0o600):
         pass
 
 
-def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | None = None, last_deleted: str | None = None, ai_history_lines: int | None = None, pref_memory_lines: int | None = None):
+def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | None = None, last_deleted: str | None = None, ai_history_lines: int | None = None, pref_memory_lines: int | None = None, ai_model: str | None = None):
     try:
         # Load existing settings to preserve unrelated fields
         data = {}
@@ -563,10 +563,15 @@ def save_settings(use_local: bool, api_key: str | None = None, endpoint: str | N
                 data['pref_memory_lines'] = int(pref_memory_lines)
             except Exception:
                 pass
+        # Persist AI model if provided
+        if ai_model is not None:
+            try:
+                data['ai_model'] = str(ai_model)
+            except Exception:
+                pass
         _atomic_write(SETTINGS_PATH, json.dumps(data, ensure_ascii=False, indent=2))
     except Exception:
         pass
-
 
 def load_settings():
     try:
@@ -580,42 +585,30 @@ def load_settings():
                 'last_credential_deleted': loaded.get('last_credential_deleted'),
                 'last_credential_deleted_ts': loaded.get('last_credential_deleted_ts'),
                 'ai_history_lines': loaded.get('ai_history_lines'),
-                'pref_memory_lines': loaded.get('pref_memory_lines')
+                'pref_memory_lines': loaded.get('pref_memory_lines'),
+                'ai_model': loaded.get('ai_model') or 'gpt-4o-mini'
             }
     except Exception:
         pass
-    return {'use_local_ai': True, 'openai_api_key': None, 'server_endpoint': None, 'last_credential_deleted': None, 'ai_history_lines': None, 'pref_memory_lines': None}
-
+    return {'use_local_ai': True, 'openai_api_key': None, 'server_endpoint': None, 'last_credential_deleted': None, 'ai_history_lines': None, 'pref_memory_lines': None, 'ai_model': 'gpt-4o-mini'}
 
 def call_local_openai(messages_for_gpt):
     OPENAI_API_KEY = get_saved_api_key()
     if not OPENAI_API_KEY:
         raise RuntimeError('No OpenAI API key available for local calls')
     try:
-        url = 'https://api.openai.com/v1/chat/completions'
-        headers = {'Authorization': f'Bearer {OPENAI_API_KEY}', 'Content-Type': 'application/json'}
-        payload = {'model': 'gpt-4o-mini', 'messages': messages_for_gpt}
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        # Try to extract assistant content in common OpenAI response shapes
-        content = ''
-        if isinstance(data, dict):
-            # completion-style
-            choices = data.get('choices') or []
-            if choices and isinstance(choices, list):
-                first = choices[0]
-                # newer responses have 'message' dict
-                msg = first.get('message') if isinstance(first, dict) else None
-                if isinstance(msg, dict):
-                    content = msg.get('content', '')
-                else:
-                    # older shape: 'text'
-                    content = first.get('text', '')
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        model = get_saved_ai_model()
+        kwargs = {'model': model, 'messages': messages_for_gpt}
+        if model.startswith('gpt-5'):
+            kwargs['reasoning_effort'] = 'minimal'
+            kwargs['verbosity'] = 'low'
+        print(kwargs)
+        response = client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content
         return content or ''
     except Exception as e:
         raise
-
 
 def call_server_api(messages_for_gpt):
     try:
@@ -753,6 +746,17 @@ def prompt_for_api_key():
         OPENAI_API_KEY = get_saved_api_key()
 
 
+def get_saved_ai_model():
+    try:
+        loaded = load_settings()
+        if isinstance(loaded, dict):
+            model = loaded.get('ai_model')
+            if model:
+                return model
+    except Exception:
+        pass
+    return 'gpt-4o-mini'
+
 def get_saved_endpoint():
     try:
         loaded = load_settings()
@@ -763,6 +767,68 @@ def get_saved_endpoint():
     except Exception:
         pass
     return None
+
+def select_ai_model():
+    try:
+        # Only allow in local mode
+        if not use_local_var.get():
+            messagebox.showinfo('AI Model', 'Only available in local mode.')
+            return
+
+        # Get current model
+        cur = get_saved_ai_model()
+
+        dlg = tk.Toplevel(root)
+        dlg.title('Select AI Model')
+        try:
+            dlg.transient(root)
+        except Exception:
+            pass
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text='Choose the AI model for local OpenAI API calls:', wraplength=400, justify='left').pack(padx=16, pady=(12,6))
+
+        model_var = tk.StringVar(value=cur)
+
+        # Radio buttons for models
+        models = ['gpt-4o-mini', 'gpt-5-nano', 'gpt-5-mini']
+        for model in models:
+            tk.Radiobutton(dlg, text=model, variable=model_var, value=model).pack(anchor='w', padx=16)
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=(12,14))
+
+        def on_save():
+            selected = model_var.get()
+            try:
+                save_settings(True, ai_model=selected)
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+            messagebox.showinfo('AI Model', f'Model set to {selected}.')
+
+        def on_cancel():
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        tk.Button(btn_frame, text='Save', command=on_save, width=10).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text='Cancel', command=on_cancel, width=10).pack(side=tk.LEFT, padx=6)
+
+        try:
+            dlg.grab_set()
+            root.wait_window(dlg)
+        except Exception:
+            try:
+                root.wait_window(dlg)
+            except Exception:
+                pass
+    except Exception as e:
+        messagebox.showerror('AI Model', str(e))
 
 
 def prompt_for_endpoint():
@@ -982,26 +1048,73 @@ def limit_chat():
                 cur = int(loaded.get('ai_history_lines') or 10)
             except Exception:
                 cur = 10
-        # Ask the user for an integer limit (0..50)
-        val = tk.simpledialog.askinteger('AI Chat Memory Limit', 'Number of recent chat lines to include when sending context to the AI (0 = only current message):', parent=root, minvalue=0, maxvalue=50, initialvalue=cur)
-        if val is None:
-            return
-        # Persist the setting while preserving other settings
+        # Present a slider dialog (1..50) so users can visually set the limit
+        dlg = tk.Toplevel(root)
+        dlg.title('AI Chat Memory Limit')
         try:
-            cur_use = use_local_var.get() if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar) else True
-        except Exception:
-            cur_use = True
-        try:
-            save_settings(bool(cur_use), ai_history_lines=int(val))
+            dlg.transient(root)
         except Exception:
             pass
-        # Update runtime limit
+        dlg.resizable(False, False)
+        tk.Label(dlg, text='Number of recent chat lines to include when sending context to the AI:', wraplength=420, justify='left').pack(padx=12, pady=(10,6), anchor='w')
+        # Enforce visible limits 1..50 as requested
+        slider_var = tk.IntVar(value=max(1, min(50, int(cur))))
+        scale = tk.Scale(dlg, from_=1, to=50, orient=tk.HORIZONTAL, variable=slider_var, length=360)
+        scale.pack(padx=12, pady=(0,6))
+        val_lbl = tk.Label(dlg, text=f'Current: {slider_var.get()} lines')
+        val_lbl.pack(padx=12, pady=(0,6))
+
+        def on_scale(_=None):
+            try:
+                val_lbl.config(text=f'Current: {slider_var.get()} lines')
+            except Exception:
+                pass
+
+        scale.config(command=on_scale)
+
+        btnf = tk.Frame(dlg)
+        btnf.pack(pady=(6,12))
+
+        def on_save():
+            val = int(slider_var.get())
+            try:
+                cur_use = use_local_var.get() if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar) else True
+            except Exception:
+                cur_use = True
+            try:
+                save_settings(bool(cur_use), ai_history_lines=int(val))
+            except Exception:
+                pass
+            try:
+                globals()['HISTORY_LIMIT'] = int(val)
+            except Exception:
+                globals()['HISTORY_LIMIT'] = cur
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+            try:
+                messagebox.showinfo('AI Chat Memory Limit', 'AI short-term memory updated.')
+            except Exception:
+                pass
+
+        def on_cancel():
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        tk.Button(btnf, text='Save', command=on_save, width=10).pack(side=tk.LEFT, padx=6)
+        tk.Button(btnf, text='Cancel', command=on_cancel, width=10).pack(side=tk.LEFT, padx=6)
         try:
-            globals()['HISTORY_LIMIT'] = int(val)
+            dlg.grab_set()
+            scale.focus_force()
+            root.wait_window(dlg)
         except Exception:
-            globals()['HISTORY_LIMIT'] = cur
-        # messagebox.showinfo('AI Chat Memory Limit', f'AI history limit set to {val} lines')
-        messagebox.showinfo('AI Chat Memory Limit', 'AI short-term memory updated.')
+            try:
+                root.wait_window(dlg)
+            except Exception:
+                pass
     except Exception as e:
         try:
             messagebox.showerror('AI Chat Memory Limit', str(e))
@@ -1018,28 +1131,72 @@ def limit_prefs():
                 cur = int(loaded.get('pref_memory_lines') or PREFS_DEFAULT_LINES)
             except Exception:
                 cur = PREFS_DEFAULT_LINES
-        # Ask the user for an integer limit (0..500)
-        val = tk.simpledialog.askinteger('AI Preference Memory Limit', 'Maximum number of preference lines to retain (oldest are dropped when exceeded):', parent=root, minvalue=0, maxvalue=500, initialvalue=cur)
-        if val is None:
-            return
-        # Persist the setting while preserving other settings
+        # Present a slider dialog (1..50) for preference entry limit
+        dlg = tk.Toplevel(root)
+        dlg.title('AI Preference Memory Limit')
         try:
-            cur_use = use_local_var.get() if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar) else True
-        except Exception:
-            cur_use = True
-        try:
-            save_settings(bool(cur_use), pref_memory_lines=int(val))
+            dlg.transient(root)
         except Exception:
             pass
-        # Update runtime limit
+        dlg.resizable(False, False)
+        tk.Label(dlg, text='Maximum number of preference lines to retain (oldest are dropped when exceeded):', wraplength=420, justify='left').pack(padx=12, pady=(10,6), anchor='w')
+        slider_var = tk.IntVar(value=max(1, min(50, int(cur))))
+        scale = tk.Scale(dlg, from_=1, to=50, orient=tk.HORIZONTAL, variable=slider_var, length=360)
+        scale.pack(padx=12, pady=(0,6))
+        val_lbl = tk.Label(dlg, text=f'Current: {slider_var.get()} lines')
+        val_lbl.pack(padx=12, pady=(0,6))
+
+        def on_scale(_=None):
+            try:
+                val_lbl.config(text=f'Current: {slider_var.get()} lines')
+            except Exception:
+                pass
+
+        scale.config(command=on_scale)
+
+        btnf = tk.Frame(dlg)
+        btnf.pack(pady=(6,12))
+
+        def on_save():
+            val = int(slider_var.get())
+            try:
+                cur_use = use_local_var.get() if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar) else True
+            except Exception:
+                cur_use = True
+            try:
+                save_settings(bool(cur_use), pref_memory_lines=int(val))
+            except Exception:
+                pass
+            try:
+                globals()['PREFS_LIMIT'] = int(val)
+            except Exception:
+                globals()['PREFS_LIMIT'] = cur
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+            try:
+                messagebox.showinfo('AI Preference Memory Limit', 'Preference memory limit updated.')
+            except Exception:
+                pass
+
+        def on_cancel():
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        tk.Button(btnf, text='Save', command=on_save, width=10).pack(side=tk.LEFT, padx=6)
+        tk.Button(btnf, text='Cancel', command=on_cancel, width=10).pack(side=tk.LEFT, padx=6)
         try:
-            globals()['PREFS_LIMIT'] = int(val)
+            dlg.grab_set()
+            scale.focus_force()
+            root.wait_window(dlg)
         except Exception:
-            globals()['PREFS_LIMIT'] = cur
-        try:
-            messagebox.showinfo('AI Preference Memory Limit', 'Preference memory limit updated.')
-        except Exception:
-            pass
+            try:
+                root.wait_window(dlg)
+            except Exception:
+                pass
     except Exception as e:
         try:
             messagebox.showerror('AI Preference Memory Limit', str(e))
@@ -1669,6 +1826,7 @@ def toggle_use_local():
 settings_menu.add_checkbutton(label='Use Local OpenAI API Key', variable=use_local_var, command=toggle_use_local)
 settings_menu.add_command(label='API Key...', command=manage_api_key)
 settings_menu.add_command(label='Server Endpoint...', command=lambda: manage_endpoint())
+settings_menu.add_command(label='AI Model...', command=lambda: select_ai_model() if use_local_var.get() else messagebox.showinfo('AI Model', 'Only available in local mode.'))
 settings_menu.add_separator()
 settings_menu.add_command(label='AI Chat Memory Limit...', command=limit_chat)
 settings_menu.add_command(label='AI Preference Memory Limit...', command=limit_prefs)

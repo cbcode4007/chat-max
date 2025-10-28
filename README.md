@@ -2,7 +2,7 @@
 
 Chat Max is a lightweight GUI for interacting with personalized GPT chat partners either locally with an API key or through a server endpoint if the user chooses, while preserving the request payload shape so existing servers stay compatible.
 
-The main program file is `chatmax-v0-4-1.py`.
+The main program file is `chatmax-v0-4-2.py`.
 
 ## Key features
 
@@ -35,7 +35,7 @@ The main program file is `chatmax-v0-4-1.py`.
 
 ## File layout
 
-- `chatmax-v0-4-1.py` — main GUI program (run with `python 'chatmax-v0-4-1.py'`).
+- `chatmax-v0-4-2.py` — main GUI program (run with `python 'chatmax-v0-4-2.py'`).
 - `settings.json` — created next to the script; keys:
 	- `use_local_ai` (bool)
 	- `openai_api_key` (string)
@@ -52,7 +52,7 @@ The main program file is `chatmax-v0-4-1.py`.
 2. From the project directory run:
 
 ```bash
-python 'chatmax-v0-4-1.py'
+python 'chatmax-v0-4-2.py'
 ```
 
 On first run the program will prompt for credentials based on the startup logic:

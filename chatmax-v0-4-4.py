@@ -1,6 +1,6 @@
-# File:        chatmax-v0-4-3.py
+# File:        chatmax-v0-4-4.py
 # Author:      Colin Fajardo
-# Version:     0.4.3 (2025-10-28, added model selection, updated local call with different prompt parameters for models, limit sliders)
+# Version:     0.4.4 (2025-10-30, gave error message functionality when messages time out instead of program 'hanging')
 #
 # Description: A simple chat interface for configuring and interacting with
 #              personalized, learning GPT models.
@@ -821,7 +821,7 @@ def send_message():
     try:
         preset_label = determine_active_preset_name()
     except Exception:
-        preset_label = 'AI'
+        preset_label = 'Default AI'
 
     # Convert GUI history to ChatGPT format under system role
     # Start with a neutral, blank-slate system instruction, all tone/style should be provided
@@ -969,6 +969,52 @@ def send_message():
         unsaved_changes = True
     except Exception:
         pass
+
+    # Flag to track if response was received (for timeout handling)
+    response_received = [False]
+
+    def timeout_callback():
+        if not response_received[0]:
+            # Determine timeout message based on current mode
+            try:
+                is_local = use_local_var.get() if 'use_local_var' in globals() and isinstance(use_local_var, tk.BooleanVar) else True
+                if is_local:
+                    timeout_msg = "Request timed out. Please check your OpenAI API key and internet connection."
+                else:
+                    timeout_msg = "Request timed out. Please check your server endpoint configuration."
+            except Exception:
+                timeout_msg = "Request timed out. Please check your API key or server endpoint configuration."
+
+            # Replace the placeholder with timeout error
+            ts = time.strftime('%Y-%m-%d %H:%M:%S')
+            history.append((preset_label, timeout_msg, ts))
+            full_history.append((preset_label, timeout_msg, ts))
+            try:
+                _trim_history()
+            except Exception:
+                pass
+
+            # Re-enable controls
+            try:
+                send_btn.config(state=tk.NORMAL)
+            except Exception:
+                pass
+            try:
+                ent = globals().get('entry')
+                if ent is not None:
+                    ent.config(state=tk.NORMAL)
+            except Exception:
+                pass
+            try:
+                show_ts_cb.config(state=tk.NORMAL)
+            except Exception:
+                pass
+
+            # Re-render the chat area to show the timeout message
+            render_history()
+
+    # Schedule timeout after 20 seconds
+    timeout_id = root.after(20000, timeout_callback)
 
     def worker(payload):
         try:
@@ -1147,6 +1193,13 @@ def send_message():
 
             # Schedule UI update on main thread: replace the last AI placeholder with real reply
             def on_success():
+                # Mark response as received to cancel timeout
+                response_received[0] = True
+                try:
+                    root.after_cancel(timeout_id)
+                except Exception:
+                    pass
+
                 # Re-render the chat_area from history to keep it simple and robust
                 render_history()
                 try:
@@ -1169,6 +1222,7 @@ def send_message():
                     pass
 
             root.after(0, on_success)
+
         except Exception as e:
             err_text = f"Error: {str(e)}"
 
@@ -1184,6 +1238,36 @@ def send_message():
                 _trim_history()
             except Exception:
                 pass
+
+            # Mark response as received to cancel timeout (even for errors)
+            response_received[0] = True
+            try:
+                root.after_cancel(timeout_id)
+            except Exception:
+                pass
+
+            # Re-enable controls on error
+            def on_error():
+                try:
+                    send_btn.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+                try:
+                    ent = globals().get('entry')
+                    if ent is not None:
+                        ent.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+                try:
+                    show_ts_cb.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+                render_history()
+
+            root.after(0, on_error)
+
+
+    # Start the worker thread to handle the API call asynchronously
     thread = threading.Thread(target=worker, args=(messages_for_gpt,), daemon=True)
     thread.start()
 
